@@ -1,0 +1,83 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: trace
+          POSTGRES_PASSWORD: trace
+          POSTGRES_DB: trace
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U trace -d trace"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        env:
+          TRACE_DATABASE_URL: postgres://trace:trace@localhost:5432/trace?sslmode=disable
+        run: go test ./... -count=1
+      - name: Race (broad)
+        env:
+          TRACE_DATABASE_URL: postgres://trace:trace@localhost:5432/trace?sslmode=disable
+        run: >
+          go test -race -count=1
+          ./internal/batch ./internal/lep ./internal/auth ./internal/webhook
+          ./internal/fingerprint ./internal/queue ./internal/decode ./internal/analysis
+          ./internal/config ./internal/objects ./internal/protocol ./internal/metrics
+          ./internal/oidc ./internal/notify ./internal/api
+      - name: Integration (postgres)
+        env:
+          TRACE_DATABASE_URL: postgres://trace:trace@localhost:5432/trace?sslmode=disable
+        run: go test ./internal/store ./internal/api ./internal/worker -count=1 -timeout 180s
+      - name: Build
+        run: go build -o /tmp/trace ./cmd/trace
+      - name: E2E ingest→process (in-process)
+        env:
+          TRACE_DATABASE_URL: postgres://trace:trace@localhost:5432/trace?sslmode=disable
+        run: go test ./internal/worker -run 'TestProcess' -count=1 -timeout 120s -v
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+      - name: Playwright smoke
+        env:
+          CI: true
+          PLAYWRIGHT_BASE_URL: http://127.0.0.1:4173
+        run: |
+          npx vite preview --host 127.0.0.1 --port 4173 --strictPort &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:4173 >/dev/null && break; sleep 1; done
+          npm run test:e2e

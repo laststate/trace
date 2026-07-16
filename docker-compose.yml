@@ -39,7 +39,8 @@ services:
       exit 0;
       "
 
-  trace:
+  # API process (no workers) — scale independently
+  trace-api:
     build: .
     ports:
       - "8080:8080"
@@ -50,11 +51,16 @@ services:
       TRACE_OBJECT_DIR: "/data/objects"
       TRACE_WEB_DIR: "/app/web/dist"
       TRACE_BOOTSTRAP: "true"
-      TRACE_WORKERS: "2"
-      TRACE_OPEN_UI: "true"
+      TRACE_MODE: "api"
+      TRACE_WORKERS: "0"
+      # Secure defaults: require login for UI APIs
+      TRACE_OPEN_UI: "false"
       TRACE_ADMIN_EMAIL: "admin@localhost"
-      TRACE_ADMIN_PASSWORD: "admin"
-      # optional MinIO (comment out to use FS only)
+      # Empty password = auto-generate strong secret to /data/bootstrap-admin.txt
+      TRACE_ADMIN_PASSWORD: ""
+      TRACE_ENV: "dev"
+      TRACE_ENABLE_RETENTION: "true"
+      TRACE_RETENTION_DAYS: "90"
       TRACE_S3_ENDPOINT: "http://minio:9000"
       TRACE_S3_BUCKET: "trace"
       TRACE_S3_REGION: "us-east-1"
@@ -67,6 +73,32 @@ services:
         condition: service_healthy
       createbucket:
         condition: service_completed_successfully
+
+  # Worker process — process_event / notify_issue
+  trace-worker:
+    build: .
+    environment:
+      TRACE_DATABASE_URL: "postgres://trace:trace@db:5432/trace?sslmode=disable"
+      TRACE_OBJECT_DIR: "/data/objects"
+      TRACE_MODE: "worker"
+      TRACE_WORKERS: "2"
+      TRACE_BOOTSTRAP: "false"
+      TRACE_ENABLE_RETENTION: "true"
+      TRACE_RETENTION_DAYS: "90"
+      TRACE_S3_ENDPOINT: "http://minio:9000"
+      TRACE_S3_BUCKET: "trace"
+      TRACE_S3_REGION: "us-east-1"
+      TRACE_S3_ACCESS_KEY: "minio"
+      TRACE_S3_SECRET_KEY: "minio12345"
+    volumes:
+      - tracedata:/data
+    depends_on:
+      db:
+        condition: service_healthy
+      createbucket:
+        condition: service_completed_successfully
+      trace-api:
+        condition: service_started
 
 volumes:
   pgdata:
