@@ -61,6 +61,50 @@ jobs:
         env:
           TRACE_DATABASE_URL: postgres://trace:trace@localhost:5432/trace?sslmode=disable
         run: go test ./internal/worker -run 'TestProcess' -count=1 -timeout 120s -v
+      - name: Start Trace for live e2e
+        env:
+          TRACE_DATABASE_URL: postgres://trace:trace@localhost:5432/trace?sslmode=disable
+          TRACE_OBJECT_DIR: ${{ runner.temp }}/trace-e2e/objects
+          TRACE_LISTEN: "127.0.0.1:18080"
+          TRACE_QUEUE: postgres
+          TRACE_BOOTSTRAP: "true"
+          TRACE_OPEN_UI: "false"
+        run: |
+          mkdir -p "${TRACE_OBJECT_DIR}"
+          /tmp/trace > "${{ runner.temp }}/trace-e2e.log" 2>&1 &
+          echo $! > "${{ runner.temp }}/trace-e2e.pid"
+          for i in $(seq 1 60); do
+            if curl -sf "http://127.0.0.1:18080/health/ready" >/dev/null; then
+              echo "trace ready"
+              break
+            fi
+            sleep 1
+          done
+          curl -sf "http://127.0.0.1:18080/health/ready"
+          test -f "${{ runner.temp }}/trace-e2e/bootstrap-token.txt"
+          echo "TRACE_E2E_TOKEN=$(tr -d '\n' < "${{ runner.temp }}/trace-e2e/bootstrap-token.txt")" >> "$GITHUB_ENV"
+          echo "TRACE_E2E_URL=http://127.0.0.1:18080" >> "$GITHUB_ENV"
+      - name: E2E Relay contract (live Trace)
+        run: go test -tags=e2e ./scripts -count=1 -timeout 120s -v
+      - name: Checkout Relay for delivery e2e
+        uses: actions/checkout@v4
+        with:
+          repository: laststate/relay
+          path: relay-ref
+      - name: Setup Go for Relay (1.26)
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: false
+      - name: E2E Relay→Trace delivery
+        working-directory: relay-ref
+        run: |
+          go test -tags=e2e ./internal/delivery -run TestLiveTrace -count=1 -timeout 180s -v
+      - name: Stop Trace
+        if: always()
+        run: |
+          if [ -f "${{ runner.temp }}/trace-e2e.pid" ]; then kill "$(cat "${{ runner.temp }}/trace-e2e.pid")" || true; fi
+          if [ -f "${{ runner.temp }}/trace-e2e.log" ]; then tail -n 80 "${{ runner.temp }}/trace-e2e.log" || true; fi
       - name: govulncheck
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest

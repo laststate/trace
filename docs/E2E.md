@@ -25,15 +25,25 @@ export TRACE_E2E_URL=http://127.0.0.1:8080
 export TRACE_E2E_TOKEN="$(tr -d '\n' < data/bootstrap-token.txt)"
 ```
 
-3. Ingest smoke:
+3. Live Relay↔Trace contract (CI runs this after starting Trace):
 
 ```bash
+export TRACE_E2E_URL=http://127.0.0.1:8080
+export TRACE_E2E_TOKEN="$(tr -d '\n' < data/bootstrap-token.txt)"
+
+# Trace-side: capabilities, duplicate 202, conflict 422
 go test -tags=e2e ./scripts -count=1 -v
-# or
-go run ./scripts/smoke_ingest.go
+
+# Relay-side (from a relay checkout): spool Accept → delivery worker → Trace
+cd ../relay
+go test -tags=e2e ./internal/delivery -run TestLiveTrace -count=1 -v
 ```
 
-4. Optional: configure Relay destination to `TRACE_E2E_URL` with the same bearer token; send LEP from Latch or a directory source.
+4. Optional smoke binary:
+
+```bash
+TRACE_URL="$TRACE_E2E_URL" TRACE_TOKEN="$TRACE_E2E_TOKEN" go run ./scripts/smoke_ingest.go
+```
 
 5. Confirm worker processing and UI: open `/overview` and `/issues`.
 
