@@ -2,7 +2,8 @@
 
 // End-to-end smoke against a running Trace instance.
 // Usage:
-//   TRACE_URL=http://localhost:8080 TRACE_TOKEN=lst_ingest_... go run ./scripts/smoke_ingest.go
+//
+//	TRACE_URL=http://localhost:8080 TRACE_TOKEN=lst_ingest_... go run ./scripts/smoke_ingest.go
 package main
 
 import (
