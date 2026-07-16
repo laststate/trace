@@ -1,0 +1,41 @@
+{
+  "name": "lep-v1",
+  "version": "1",
+  "vectors": [
+    {
+      "id": "valid-basic",
+      "path": "valid/lep-v1-basic.hex",
+      "expect": "valid"
+    },
+    {
+      "id": "invalid-magic",
+      "path": "invalid/bad-magic.hex",
+      "expect": "invalid"
+    },
+    {
+      "id": "invalid-header-crc",
+      "path": "invalid/bad-header-crc.hex",
+      "expect": "invalid"
+    },
+    {
+      "id": "invalid-payload-crc",
+      "path": "invalid/bad-payload-crc.hex",
+      "expect": "invalid"
+    },
+    {
+      "id": "invalid-tlv-zero",
+      "path": "invalid/tlv-type-zero.hex",
+      "expect": "invalid"
+    },
+    {
+      "id": "invalid-version",
+      "path": "invalid/unsupported-version.hex",
+      "expect": "invalid"
+    },
+    {
+      "id": "invalid-flags",
+      "path": "invalid/unknown-flags.hex",
+      "expect": "invalid"
+    }
+  ]
+}

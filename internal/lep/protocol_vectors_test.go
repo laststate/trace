@@ -11,13 +11,12 @@ import (
 	"github.com/laststate/trace/internal/lep"
 )
 
-// TestProtocolVectors runs laststate/protocol test-vectors against this codec.
-// Set PROTOCOL_VECTORS to the protocol/test-vectors directory (CI checks out
-// the protocol repo). When unset, common sibling layouts are tried; otherwise skip.
+// TestProtocolVectors runs laststate/protocol goldens (vendored under testdata/).
+// PROTOCOL_VECTORS overrides the root when set (e.g. monorepo checkout).
 func TestProtocolVectors(t *testing.T) {
 	root := protocolVectorsRoot()
 	if root == "" {
-		t.Skip("protocol test-vectors not found; set PROTOCOL_VECTORS")
+		t.Fatal("protocol test-vectors not found (expected testdata/protocol-vectors)")
 	}
 	raw, err := os.ReadFile(filepath.Join(root, "manifest.json"))
 	if err != nil {
@@ -70,11 +69,10 @@ func protocolVectorsRoot() string {
 			return p
 		}
 	}
-	// Common local layouts: monorepo sibling or CI checkout path.
+	// Prefer vendored copy (cwd = package dir during go test).
 	candidates := []string{
+		filepath.Join("testdata", "protocol-vectors"),
 		filepath.Join("..", "..", "..", "protocol", "test-vectors"),
-		filepath.Join("protocol-ref", "test-vectors"),
-		filepath.Join("..", "protocol-ref", "test-vectors"),
 	}
 	for _, c := range candidates {
 		if st, err := os.Stat(filepath.Join(c, "manifest.json")); err == nil && !st.IsDir() {

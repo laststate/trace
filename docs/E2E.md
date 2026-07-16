@@ -34,10 +34,15 @@ export TRACE_E2E_TOKEN="$(tr -d '\n' < data/bootstrap-token.txt)"
 # Trace-side: capabilities, duplicate 202, conflict 422
 go test -tags=e2e ./scripts -count=1 -v
 
-# Relay-side (from a relay checkout): spool Accept → delivery worker → Trace
+# Relay-side (from a relay checkout; not run in Trace CI — private cross-repo):
 cd ../relay
 go test -tags=e2e ./internal/delivery -run TestLiveTrace -count=1 -v
 ```
+
+CI starts Trace and runs `go test -tags=e2e ./scripts` only. Protocol goldens are
+vendored under `internal/lep/testdata/protocol-vectors/` (private org repos cannot
+be checked out with the default Actions token).
+
 
 4. Optional smoke binary:
 
