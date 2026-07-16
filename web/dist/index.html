@@ -15,13 +15,20 @@
         <button data-view="issues">Issues</button>
         <button data-view="events">Events</button>
         <button data-view="devices">Devices</button>
+        <button data-view="releases">Releases</button>
+        <button data-view="artifacts">Artifacts</button>
+        <button data-view="audit">Audit</button>
+        <button data-view="settings">Settings</button>
       </nav>
-      <div class="side-foot">v0.1 · dark</div>
+      <div class="side-foot" id="auth-foot">v0.2 · phase2</div>
     </aside>
     <main>
       <header class="topbar">
         <div id="crumb">Overview</div>
-        <div class="meta" id="meta"></div>
+        <div class="row">
+          <div class="meta" id="meta"></div>
+          <button class="btn secondary" id="login-btn" type="button">Login</button>
+        </div>
       </header>
       <section id="content" class="content"></section>
     </main>

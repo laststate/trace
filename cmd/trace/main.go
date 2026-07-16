@@ -61,6 +61,12 @@ func main() {
 			log.Error("bootstrap", "err", err)
 			os.Exit(1)
 		}
+		if u, pw, err := st.EnsureAdmin(ctx, cfg.AdminEmail, cfg.AdminPassword, "Admin"); err == nil {
+			log.Info("admin user created", "email", u.Email, "password", pw)
+		} else if err.Error() != "admin already exists" {
+			log.Error("admin bootstrap", "err", err)
+			os.Exit(1)
+		}
 	}
 
 	q := &queue.Queue{Pool: pool}
@@ -74,7 +80,6 @@ func main() {
 	if stInfo, err := os.Stat(webDir); err == nil && stInfo.IsDir() {
 		ui = http.Dir(webDir)
 	} else {
-		// empty FS fallback
 		ui = http.FS(emptyFS{})
 	}
 
@@ -86,7 +91,7 @@ func main() {
 	}
 
 	go func() {
-		log.Info("listening", "addr", cfg.Listen, "public_url", cfg.PublicURL)
+		log.Info("listening", "addr", cfg.Listen, "public_url", cfg.PublicURL, "open_ui", cfg.OpenUI)
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Error("http", "err", err)
 			cancel()

@@ -14,9 +14,11 @@ import (
 	"github.com/laststate/trace/internal/decode"
 	"github.com/laststate/trace/internal/fingerprint"
 	"github.com/laststate/trace/internal/lep"
+	"github.com/laststate/trace/internal/metrics"
 	"github.com/laststate/trace/internal/objects"
 	"github.com/laststate/trace/internal/queue"
 	"github.com/laststate/trace/internal/store"
+	"github.com/laststate/trace/internal/symbolicate"
 )
 
 type Worker struct {
@@ -56,10 +58,12 @@ func (w *Worker) tick(ctx context.Context) {
 		return
 	}
 	if err := w.handle(ctx, job); err != nil {
+		metrics.JobsFailed.Add(1)
 		w.Log.Error("job failed", "id", job.ID, "type", job.Type, "err", err)
 		_ = w.Queue.Fail(ctx, job.ID, job.Lease, err.Error(), time.Duration(job.Attempt)*time.Second, 20)
 		return
 	}
+	metrics.JobsCompleted.Add(1)
 	_ = w.Queue.Complete(ctx, job.ID, job.Lease)
 }
 
@@ -91,23 +95,12 @@ func (w *Worker) processEvent(ctx context.Context, id uuid.UUID) error {
 	if err != nil {
 		return err
 	}
-	// mark decoding
 	dec, err := decode.Envelope(raw)
 	if err != nil {
-		// still store failure state
 		fail, _ := json.Marshal(map[string]string{"error": err.Error()})
 		return w.Store.FinalizeEvent(ctx, id, nil, nil, nil, nil, "failed", "", fail, json.RawMessage(`{}`), json.RawMessage(`[]`))
 	}
 	report := analysis.FromDecoded(dec)
-	fp := fingerprint.Compute(dec, report)
-	title := fingerprint.Title(dec, report)
-
-	severity := "error"
-	if dec.Event != nil {
-		severity = decode.SeverityName(dec.Event.Severity)
-	} else if dec.Header.Type == lep.TypeCrash || dec.Header.Type == lep.TypeCoredump {
-		severity = "fatal"
-	}
 
 	device, err := w.Store.UpsertDevice(ctx, ev.ProjectID, dec.Identity.DeviceID, dec.Identity.Product, dec.Identity.HardwareRevision, dec.Identity.FirmwareVersion, dec.Identity.BuildID)
 	if err != nil {
@@ -128,9 +121,46 @@ func (w *Worker) processEvent(ctx context.Context, id uuid.UUID) error {
 	if dec.Identity.BuildID != "" {
 		if art, err := w.Store.FindArtifactByBuildID(ctx, ev.ProjectID, dec.Identity.BuildID); err == nil {
 			artifactID = &art.ID
-			// symbolication: leave addresses; external tool optional later
-			report.Warnings = append(report.Warnings, "artifact found; external symbolication not run in v0.1 core path")
+			path := w.Object.Path(art.ObjectKey)
+			addrs := make([]uint64, 0, len(report.Frames))
+			for _, f := range report.Frames {
+				addrs = append(addrs, f.Address)
+			}
+			if len(addrs) == 0 && report.PC != 0 {
+				addrs = append(addrs, uint64(report.PC&^1))
+				if report.LR != 0 {
+					addrs = append(addrs, uint64(report.LR&^1))
+				}
+			}
+			frames, warns, err := symbolicate.Resolve(path, addrs)
+			report.Warnings = append(report.Warnings, warns...)
+			if err != nil {
+				report.Warnings = append(report.Warnings, "symbolication: "+err.Error())
+			} else if len(frames) > 0 {
+				report.Frames = toAnalysisFrames(frames)
+				if report.Confidence < 0.9 {
+					report.Confidence += 0.15
+					if report.Confidence > 1 {
+						report.Confidence = 1
+					}
+				}
+				// recompute summary with symbols
+				if report.Frames[0].Function != "" && report.ProbableCause == "" {
+					report.Summary = report.Frames[0].Function
+				}
+			}
 		}
+	}
+
+	// fingerprint after symbolication so top frame function stabilizes issues
+	fp := fingerprint.Compute(dec, report)
+	title := fingerprint.Title(dec, report)
+
+	severity := "error"
+	if dec.Event != nil {
+		severity = decode.SeverityName(dec.Event.Severity)
+	} else if dec.Header.Type == lep.TypeCrash || dec.Header.Type == lep.TypeCoredump {
+		severity = "fatal"
 	}
 
 	issue, err := w.Store.UpsertIssue(ctx, ev.ProjectID, fp, title, severity, report.ProbableCause, &deviceID)
@@ -144,4 +174,12 @@ func (w *Worker) processEvent(ctx context.Context, id uuid.UUID) error {
 	framesJSON, _ := json.Marshal(report.Frames)
 
 	return w.Store.FinalizeEvent(ctx, id, &deviceID, releaseID, artifactID, &issueID, "ready", fp, decodedJSON, analysisJSON, framesJSON)
+}
+
+func toAnalysisFrames(in []symbolicate.Frame) []analysis.Frame {
+	out := make([]analysis.Frame, len(in))
+	for i, f := range in {
+		out[i] = analysis.Frame{Address: f.Address, Function: f.Function, File: f.File, Line: f.Line, Inline: f.Inline}
+	}
+	return out
 }

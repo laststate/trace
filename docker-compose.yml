@@ -27,6 +27,9 @@ services:
       TRACE_WEB_DIR: "/app/web/dist"
       TRACE_BOOTSTRAP: "true"
       TRACE_WORKERS: "2"
+      TRACE_OPEN_UI: "true"
+      TRACE_ADMIN_EMAIL: "admin@localhost"
+      TRACE_ADMIN_PASSWORD: "admin"
     volumes:
       - tracedata:/data
     depends_on:

@@ -49,9 +49,13 @@ go run ./cmd/trace
 
 LEP validation follows [laststate/protocol](https://github.com/laststate/protocol).
 
-## v0.1 status
+## v0.2 (Phase 2 / Production Alpha)
 
-Implements the First Incident path from the product spec. Not full v1.0 (RBAC UI, artifact upload pipeline, llvm-symbolizer sandbox, alerts, OIDC, MinIO multi-node, etc.).
+Adds: artifact upload + ELF build-id, external symbolication, issue status,
+devices/releases/artifacts UI, session auth + RBAC ranks, Prometheus `/metrics`,
+audit log.
+
+Still local/dev defaults: `TRACE_OPEN_UI=true` (GET open), admin `admin@localhost` / `admin`.
 
 ## License
 
