@@ -49,13 +49,16 @@ go run ./cmd/trace
 
 LEP validation follows [laststate/protocol](https://github.com/laststate/protocol).
 
-## v0.2 (Phase 2 / Production Alpha)
+## v0.3 (skipped backlog)
 
-Adds: artifact upload + ELF build-id, external symbolication, issue status,
-devices/releases/artifacts UI, session auth + RBAC ranks, Prometheus `/metrics`,
-audit log.
+- Binary batch LSBT (`binary_batch: true`)
+- MinIO/S3 object store (`TRACE_S3_*`)
+- Alerts + HMAC webhooks
+- OIDC login (`TRACE_OIDC_*`)
+- Symbolizer sandbox (timeout, env wipe, caps)
+- React UI (Vite) in `web/`
 
-Still local/dev defaults: `TRACE_OPEN_UI=true` (GET open), admin `admin@localhost` / `admin`.
+SAML: not implemented — use OIDC; add when ADFS/SAML-only IdP required.
 
 ## License
 

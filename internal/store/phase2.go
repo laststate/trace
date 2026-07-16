@@ -113,6 +113,11 @@ func (s *Store) Login(ctx context.Context, email, password string) (Session, str
 	if err != nil {
 		return Session{}, "", err
 	}
+	return s.MintSession(ctx, u, orgID, role)
+}
+
+// MintSession creates a bearer session token for a user.
+func (s *Store) MintSession(ctx context.Context, u User, orgID uuid.UUID, role string) (Session, string, error) {
 	secret, prefix, th, err := auth.Mint("lst_sess")
 	if err != nil {
 		return Session{}, "", err

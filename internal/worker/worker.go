@@ -19,12 +19,13 @@ import (
 	"github.com/laststate/trace/internal/queue"
 	"github.com/laststate/trace/internal/store"
 	"github.com/laststate/trace/internal/symbolicate"
+	"github.com/laststate/trace/internal/webhook"
 )
 
 type Worker struct {
 	Store  *store.Store
 	Queue  *queue.Queue
-	Object objects.Store
+	Object *objects.Store
 	Lease  time.Duration
 	Log    *slog.Logger
 }
@@ -81,6 +82,24 @@ func (w *Worker) handle(ctx context.Context, job queue.Job) error {
 			return err
 		}
 		return w.processEvent(ctx, id)
+	case "notify_issue":
+		var p struct {
+			ProjectID string `json:"project_id"`
+			IssueID   string `json:"issue_id"`
+			Kind      string `json:"kind"`
+		}
+		if err := json.Unmarshal(job.Payload, &p); err != nil {
+			return err
+		}
+		pid, err := uuid.Parse(p.ProjectID)
+		if err != nil {
+			return err
+		}
+		iid, err := uuid.Parse(p.IssueID)
+		if err != nil {
+			return err
+		}
+		return w.notifyIssue(ctx, pid, iid, p.Kind)
 	default:
 		return errors.New("unknown job type: " + job.Type)
 	}
@@ -144,15 +163,10 @@ func (w *Worker) processEvent(ctx context.Context, id uuid.UUID) error {
 						report.Confidence = 1
 					}
 				}
-				// recompute summary with symbols
-				if report.Frames[0].Function != "" && report.ProbableCause == "" {
-					report.Summary = report.Frames[0].Function
-				}
 			}
 		}
 	}
 
-	// fingerprint after symbolication so top frame function stabilizes issues
 	fp := fingerprint.Compute(dec, report)
 	title := fingerprint.Title(dec, report)
 
@@ -168,12 +182,68 @@ func (w *Worker) processEvent(ctx context.Context, id uuid.UUID) error {
 		return err
 	}
 	issueID := issue.ID
+	created := issue.EventCount == 1
 
 	decodedJSON, _ := json.Marshal(dec)
 	analysisJSON, _ := json.Marshal(report)
 	framesJSON, _ := json.Marshal(report.Frames)
 
-	return w.Store.FinalizeEvent(ctx, id, &deviceID, releaseID, artifactID, &issueID, "ready", fp, decodedJSON, analysisJSON, framesJSON)
+	if err := w.Store.FinalizeEvent(ctx, id, &deviceID, releaseID, artifactID, &issueID, "ready", fp, decodedJSON, analysisJSON, framesJSON); err != nil {
+		return err
+	}
+
+	if created {
+		kind := "new_issue"
+		if severity == "fatal" {
+			kind = "new_fatal_issue"
+		}
+		_ = w.Store.EnqueueJob(ctx, "notify_issue", map[string]string{
+			"project_id": ev.ProjectID.String(),
+			"issue_id":   issueID.String(),
+			"kind":       kind,
+		})
+	}
+	return nil
+}
+
+func (w *Worker) notifyIssue(ctx context.Context, projectID, issueID uuid.UUID, kind string) error {
+	issue, err := w.Store.GetIssue(ctx, issueID)
+	if err != nil {
+		return err
+	}
+	// also fire new_issue rules for fatal
+	kinds := []string{kind}
+	if kind == "new_fatal_issue" {
+		kinds = append(kinds, "new_issue")
+	}
+	payload := map[string]any{
+		"type":       kind,
+		"issue":      issue,
+		"project_id": projectID.String(),
+	}
+	for _, k := range kinds {
+		rules, err := w.Store.RulesForKind(ctx, projectID, k)
+		if err != nil {
+			return err
+		}
+		for _, rule := range rules {
+			if rule.Channel != "webhook" || rule.TargetURL == "" {
+				continue
+			}
+			d, err := webhook.Send(ctx, rule.TargetURL, rule.Secret, payload)
+			rid := rule.ID
+			body := ""
+			code := 0
+			ok := false
+			if err != nil {
+				body = err.Error()
+			} else {
+				body, code, ok = d.Body, d.StatusCode, d.Success
+			}
+			_ = w.Store.RecordWebhook(ctx, projectID, &rid, kind, rule.TargetURL, code, ok, body, payload)
+		}
+	}
+	return nil
 }
 
 func toAnalysisFrames(in []symbolicate.Frame) []analysis.Frame {

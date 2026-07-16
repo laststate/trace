@@ -1,15 +1,22 @@
-// Package symbolicate resolves addresses via llvm-symbolizer or addr2line.
+// Package symbolicate resolves addresses via llvm-symbolizer or addr2line (sandboxed).
 package symbolicate
 
 import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+)
+
+const (
+	maxAddresses = 64
+	maxOutput    = 1 << 20
+	defaultTO    = 5 * time.Second
 )
 
 type Frame struct {
@@ -21,27 +28,42 @@ type Frame struct {
 	Inline   bool   `json:"inline,omitempty"`
 }
 
-// Resolve tries llvm-symbolizer then *-addr2line. Empty binary list = PATH probe.
+// Resolve tries llvm-symbolizer then *-addr2line. Sandbox: abs path, wiped env, timeout, caps.
 func Resolve(artifactPath string, addresses []uint64) ([]Frame, []string, error) {
 	if len(addresses) == 0 {
 		return nil, nil, nil
 	}
+	if len(addresses) > maxAddresses {
+		addresses = addresses[:maxAddresses]
+	}
+	abs, err := filepath.Abs(artifactPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	// refuse path escape / missing file
+	if st, err := os.Stat(abs); err != nil || st.IsDir() {
+		out := rawFrames(addresses)
+		return out, []string{"artifact missing for symbolication"}, nil
+	}
 	var warns []string
 	for _, c := range candidates() {
-		frames, err := run(c.bin, c.style, artifactPath, addresses)
+		frames, err := runSandboxed(c.bin, c.style, abs, addresses)
 		if err != nil {
 			warns = append(warns, c.bin+": "+err.Error())
 			continue
 		}
 		return frames, warns, nil
 	}
-	// fall back to raw addresses
+	warns = append(warns, "no symbolizer binary found in PATH")
+	return rawFrames(addresses), warns, nil
+}
+
+func rawFrames(addresses []uint64) []Frame {
 	out := make([]Frame, len(addresses))
 	for i, a := range addresses {
 		out[i] = Frame{Address: a}
 	}
-	warns = append(warns, "no symbolizer binary found in PATH")
-	return out, warns, nil
+	return out
 }
 
 type cand struct{ bin, style string }
@@ -61,34 +83,36 @@ func candidates() []cand {
 	return out
 }
 
-func run(bin, style, artifactPath string, addresses []uint64) ([]Frame, error) {
-	abs, err := filepath.Abs(artifactPath)
-	if err != nil {
-		return nil, err
+func runSandboxed(bin, style, absArtifact string, addresses []uint64) ([]Frame, error) {
+	// only allow absolute binary from LookPath
+	if !filepath.IsAbs(bin) {
+		return nil, fmt.Errorf("symbolizer path not absolute")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), defaultTO)
 	defer cancel()
 	var args []string
 	if style == "addr2line" {
-		args = []string{"-e", abs, "-f", "-C", "-p"}
+		args = []string{"-e", absArtifact, "-f", "-C", "-p"}
 		for _, a := range addresses {
 			args = append(args, fmt.Sprintf("0x%x", a))
 		}
 	} else {
-		args = []string{"--obj=" + abs, "--functions", "--demangle", "--inlines"}
+		args = []string{"--obj=" + absArtifact, "--functions", "--demangle", "--inlines"}
 		for _, a := range addresses {
 			args = append(args, fmt.Sprintf("0x%x", a))
 		}
 	}
 	cmd := exec.CommandContext(ctx, bin, args...)
-	cmd.Dir = filepath.Dir(abs)
-	cmd.Env = []string{"PATH=", "LANG=C"}
+	// sandbox: no shell, empty PATH, fixed LANG, workdir = parent of artifact only
+	cmd.Dir = filepath.Dir(absArtifact)
+	cmd.Env = []string{"LANG=C", "LC_ALL=C", "PATH="}
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("%w (%s)", err, strings.TrimSpace(stderr.String()))
 	}
-	if stdout.Len() > 1<<20 {
+	if stdout.Len() > maxOutput {
 		return nil, fmt.Errorf("symbolizer output too large")
 	}
 	return parseOutput(addresses, stdout.String(), style), nil
@@ -137,15 +161,11 @@ func splitFileLine(v string) (string, int) {
 }
 
 func splitFileLineCol(v string) (string, int, int) {
-	// path may contain drive letters on Windows: C:\foo:12:3
 	parts := strings.Split(v, ":")
 	if len(parts) < 2 {
 		return v, 0, 0
 	}
-	// last two may be line/col
-	col := 0
-	line := 0
-	fileEnd := len(parts)
+	col, line, fileEnd := 0, 0, len(parts)
 	if n, err := strconv.Atoi(parts[len(parts)-1]); err == nil {
 		col = n
 		fileEnd--
@@ -154,8 +174,7 @@ func splitFileLineCol(v string) (string, int, int) {
 				line = n
 				fileEnd--
 			} else {
-				line = col
-				col = 0
+				line, col = col, 0
 			}
 		}
 	}

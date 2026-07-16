@@ -40,7 +40,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	obj := objects.Store{Root: cfg.ObjectDir}
+	obj := &objects.Store{
+		Root: cfg.ObjectDir,
+		Endpoint: cfg.S3Endpoint, Region: cfg.S3Region, Bucket: cfg.S3Bucket,
+		AccessKey: cfg.S3AccessKey, SecretKey: cfg.S3SecretKey,
+	}
 	if err := obj.Ensure(); err != nil {
 		log.Error("object store", "err", err)
 		os.Exit(1)
@@ -91,7 +95,7 @@ func main() {
 	}
 
 	go func() {
-		log.Info("listening", "addr", cfg.Listen, "public_url", cfg.PublicURL, "open_ui", cfg.OpenUI)
+		log.Info("listening", "addr", cfg.Listen, "public_url", cfg.PublicURL, "s3", cfg.S3Endpoint != "", "oidc", cfg.OIDCIssuer != "")
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Error("http", "err", err)
 			cancel()

@@ -14,6 +14,7 @@ import (
 
 	"github.com/laststate/trace/internal/artifact"
 	"github.com/laststate/trace/internal/auth"
+	"github.com/laststate/trace/internal/batch"
 	"github.com/laststate/trace/internal/config"
 	"github.com/laststate/trace/internal/lep"
 	"github.com/laststate/trace/internal/metrics"
@@ -24,7 +25,7 @@ import (
 type Server struct {
 	Cfg    config.Config
 	Store  *store.Store
-	Object objects.Store
+	Object *objects.Store
 	Log    *slog.Logger
 	UI     http.FileSystem
 }
@@ -59,6 +60,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/audit", s.requireUI(s.apiAudit, "admin"))
 	mux.HandleFunc("POST /api/tokens", s.requireUI(s.apiCreateToken, "admin"))
 	mux.HandleFunc("GET /api/bootstrap", s.apiBootstrapInfo)
+	mux.HandleFunc("GET /api/alerts", s.requireUI(s.apiAlerts, "viewer"))
+	mux.HandleFunc("POST /api/alerts", s.requireUI(s.apiCreateAlert, "admin"))
+	mux.HandleFunc("GET /api/webhooks/deliveries", s.requireUI(s.apiWebhookDeliveries, "admin"))
+	mux.HandleFunc("GET /api/auth/oidc/login", s.oidcLogin)
+	mux.HandleFunc("GET /api/auth/oidc/callback", s.oidcCallback)
 
 	if s.UI != nil {
 		fileServer := http.FileServer(s.UI)
@@ -93,8 +99,9 @@ func (s *Server) capabilities(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, 200, map[string]any{
 		"api_version": "1", "lep_versions": []int{1}, "max_event_size": max,
 		"max_batch_events": 100, "max_batch_bytes": max * 50, "compression": []string{"identity"},
-		"batch_ingest": true, "binary_batch": false, "artifact_upload": true,
-		"authentication": []string{"bearer"}, "server_id": "trace-v0.2",
+		"batch_ingest": true, "binary_batch": true, "artifact_upload": true,
+		"authentication": []string{"bearer"}, "server_id": "trace-v0.3",
+		"oidc": s.Cfg.OIDCIssuer != "",
 	})
 }
 
@@ -163,14 +170,34 @@ func (s *Server) ingestBatch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "invalid_body", "could not read body", false)
 		return
 	}
-	var req batchRequest
-	if err := json.Unmarshal(raw, &req); err != nil {
-		writeErr(w, 400, "invalid_json", err.Error(), false)
-		return
+	type item struct {
+		EventID string
+		Payload []byte
+	}
+	var events []item
+	ct := r.Header.Get("Content-Type")
+	if strings.Contains(ct, "vnd.laststate.batch") || (len(raw) >= 4 && string(raw[:4]) == batch.Magic) {
+		be, err := batch.Decode(raw)
+		if err != nil {
+			writeErr(w, 400, "invalid_batch", err.Error(), false)
+			return
+		}
+		for _, e := range be {
+			events = append(events, item{EventID: e.EventID, Payload: e.Payload})
+		}
+	} else {
+		var req batchRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			writeErr(w, 400, "invalid_json", err.Error(), false)
+			return
+		}
+		for _, e := range req.Events {
+			events = append(events, item{EventID: e.EventID, Payload: e.Payload})
+		}
 	}
 	resp := map[string]any{"accepted": []any{}, "duplicates": []any{}, "rejected": []any{}}
 	var accepted, dups, rejected []map[string]any
-	for _, e := range req.Events {
+	for _, e := range events {
 		res, code, msg, retryable, err := s.acceptOne(r, tok.ProjectID, e.EventID, e.Payload)
 		if err != nil {
 			metrics.IngestRejected.Add(1)
@@ -428,6 +455,13 @@ func (s *Server) apiIssueStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.Store.Audit(r.Context(), nil, nil, nil, &item.ProjectID, "issue.status", "issue", id.String(), clientIP(r), r.UserAgent(), map[string]any{"status": body.Status})
+	if body.Status == "resolved" {
+		_ = s.Store.EnqueueJob(r.Context(), "notify_issue", map[string]string{
+			"project_id": item.ProjectID.String(),
+			"issue_id":   item.ID.String(),
+			"kind":       "issue_resolved",
+		})
+	}
 	writeJSON(w, 200, item)
 }
 
