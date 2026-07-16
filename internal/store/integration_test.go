@@ -33,6 +33,11 @@ func testStore(t *testing.T) (*store.Store, context.Context) {
 	return &store.Store{Pool: pool}, ctx
 }
 
+// hash64 returns a 64-char pseudo-hash (uuid strings are only 36 chars).
+func hash64() string {
+	return (uuid.NewString() + uuid.NewString())[:64]
+}
+
 func TestBootstrapLoginAndIngestIdempotency(t *testing.T) {
 	st, ctx := testStore(t)
 
@@ -68,8 +73,7 @@ func TestBootstrapLoginAndIngestIdempotency(t *testing.T) {
 	// create fresh user path via login of existing — skip if many users
 
 	eventID := "evt-test-" + uuid.NewString()
-	// payload_hash is 64 hex-like chars (uuid string is only 36)
-	hash := (uuid.NewString() + uuid.NewString())[:64]
+	hash := hash64()
 	res, err := st.CreateEventIdempotent(ctx, p.ID, eventID, 2, 1, 1, 1, "error", "k/"+hash, hash, 10, json.RawMessage(`{}`), "issue")
 	if err != nil {
 		t.Fatal(err)
@@ -83,7 +87,7 @@ func TestBootstrapLoginAndIngestIdempotency(t *testing.T) {
 		t.Fatal(err, res2)
 	}
 	// conflict different hash
-	other := (uuid.NewString() + uuid.NewString())[:64]
+	other := hash64()
 	_, err = st.CreateEventIdempotent(ctx, p.ID, eventID, 2, 1, 1, 1, "error", "k/other", other, 10, json.RawMessage(`{}`), "issue")
 	if err != store.ErrConflict {
 		t.Fatalf("want conflict got %v", err)
@@ -149,8 +153,7 @@ func TestLinkEventToIssueRegression(t *testing.T) {
 	}
 	fp := "fp-" + uuid.NewString()
 	// create event
-	hash := uuid.NewString() + uuid.NewString()
-	hash = hash[:64]
+	hash := hash64()
 	res, err := st.CreateEventIdempotent(ctx, p.ID, "e-"+uuid.NewString(), 1, 1, 1, 1, "fatal", "k", hash, 1, json.RawMessage(`{}`), "issue")
 	if err != nil {
 		t.Fatal(err)
@@ -169,8 +172,7 @@ func TestLinkEventToIssueRegression(t *testing.T) {
 		t.Fatal(err)
 	}
 	// second event same fp → regression
-	hash2 := uuid.NewString() + uuid.NewString()
-	hash2 = hash2[:64]
+	hash2 := hash64()
 	res2, err := st.CreateEventIdempotent(ctx, p.ID, "e-"+uuid.NewString(), 1, 1, 1, 1, "fatal", "k2", hash2, 1, json.RawMessage(`{}`), "issue")
 	if err != nil {
 		t.Fatal(err)
@@ -200,8 +202,7 @@ func TestIssueMergeSplit(t *testing.T) {
 		t.Skip(err)
 	}
 	mk := func() (uuid.UUID, store.Issue) {
-		h := uuid.NewString() + "aaaa"
-		h = h[:64]
+		h := hash64()
 		res, err := st.CreateEventIdempotent(ctx, p.ID, "e-"+uuid.NewString(), 1, 1, 1, 1, "error", "k", h, 1, json.RawMessage(`{}`), "issue")
 		if err != nil {
 			t.Fatal(err)
