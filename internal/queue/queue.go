@@ -14,6 +14,15 @@ import (
 	"github.com/laststate/trace/internal/auth"
 )
 
+// Jober abstracts job claim/complete for PG/NATS/Redis backends.
+type Jober interface {
+	Claim(ctx context.Context, leaseFor time.Duration) (Job, error)
+	Complete(ctx context.Context, id uuid.UUID, lease string) error
+	Fail(ctx context.Context, id uuid.UUID, lease, msg string, retryIn time.Duration, maxAttempts int) error
+	Renew(ctx context.Context, id uuid.UUID, lease string, leaseFor time.Duration) error
+	Enqueue(ctx context.Context, typ string, payload any) error
+}
+
 type Job struct {
 	ID      uuid.UUID
 	Type    string
@@ -22,9 +31,12 @@ type Job struct {
 	Lease   string
 }
 
+// Queue is the PostgreSQL SKIP LOCKED implementation.
 type Queue struct {
 	Pool *pgxpool.Pool
 }
+
+var _ Jober = (*Queue)(nil)
 
 func (q *Queue) Claim(ctx context.Context, leaseFor time.Duration) (Job, error) {
 	tx, err := q.Pool.Begin(ctx)
@@ -62,6 +74,20 @@ WHERE id=$1`, j.ID, j.Attempt, j.Lease, time.Now().Add(leaseFor))
 	return j, nil
 }
 
+// Renew extends the lease so long-running workers do not lose exclusivity.
+func (q *Queue) Renew(ctx context.Context, id uuid.UUID, lease string, leaseFor time.Duration) error {
+	ct, err := q.Pool.Exec(ctx, `
+UPDATE jobs SET leased_until=$3
+WHERE id=$1 AND lease_token=$2 AND status='leased'`, id, lease, time.Now().Add(leaseFor))
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("job lease mismatch on renew")
+	}
+	return nil
+}
+
 func (q *Queue) Complete(ctx context.Context, id uuid.UUID, lease string) error {
 	_, err := q.Pool.Exec(ctx, `
 UPDATE jobs SET status='done', lease_token=NULL, leased_until=NULL WHERE id=$1 AND lease_token=$2`, id, lease)
@@ -85,4 +111,25 @@ WHERE id=$1 AND lease_token=$2`, id, lease, msg, maxAttempts, next)
 		return fmt.Errorf("job lease mismatch")
 	}
 	return nil
+}
+
+func (q *Queue) Enqueue(ctx context.Context, typ string, payload any) error {
+	if err := GuardEnqueue(ctx, q); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	// Deduplicate ready process_event jobs for same event_id when payload matches
+	_, err = q.Pool.Exec(ctx, `INSERT INTO jobs(type,payload,status) VALUES($1,$2,'ready')`, typ, raw)
+	return err
+}
+
+func (q *Queue) Depth(ctx context.Context) (int64, error) {
+	var n int64
+	err := q.Pool.QueryRow(ctx, `
+SELECT COUNT(*) FROM jobs
+WHERE status IN ('ready','retry') AND available_at <= now()`).Scan(&n)
+	return n, err
 }
