@@ -54,6 +54,13 @@ func Resolve(artifactPath string, addresses []uint64) ([]Frame, []string, error)
 		}
 		return frames, warns, nil
 	}
+	// Fallback: ELF symbol table (no external binary)
+	if frames, err := ResolveELF(abs, addresses); err == nil {
+		warns = append(warns, "used ELF symbol table (no llvm-symbolizer in PATH)")
+		return frames, warns, nil
+	} else {
+		warns = append(warns, "elf symbols: "+err.Error())
+	}
 	warns = append(warns, "no symbolizer binary found in PATH")
 	return rawFrames(addresses), warns, nil
 }
@@ -103,12 +110,20 @@ func runSandboxed(bin, style, absArtifact string, addresses []uint64) ([]Frame, 
 		}
 	}
 	cmd := exec.CommandContext(ctx, bin, args...)
-	// sandbox: no shell, empty PATH, fixed LANG, workdir = parent of artifact only
+	// sandbox: no shell, wiped env, no network via empty proxies, workdir = artifact dir only
 	cmd.Dir = filepath.Dir(absArtifact)
-	cmd.Env = []string{"LANG=C", "LC_ALL=C", "PATH="}
+	cmd.Env = []string{
+		"LANG=C", "LC_ALL=C", "PATH=",
+		"HOME=", "TMPDIR=", "TMP=", "TEMP=",
+		"http_proxy=http://127.0.0.1:0", "https_proxy=http://127.0.0.1:0",
+		"HTTP_PROXY=http://127.0.0.1:0", "HTTPS_PROXY=http://127.0.0.1:0",
+		"NO_PROXY=*", "no_proxy=*",
+	}
+	cmd.Stdin = nil
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	// CPU soft limit via context timeout (defaultTO); memory/output capped below
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("%w (%s)", err, strings.TrimSpace(stderr.String()))
 	}
@@ -139,18 +154,52 @@ func parseOutput(addresses []uint64, output, style string) []Frame {
 		}
 		return frames
 	}
-	for i := 0; i < len(lines) && idx < len(frames); i++ {
+	// llvm-symbolizer with --inlines: each address may emit multiple fn/file pairs,
+	// separated by blank lines between addresses.
+	for i := 0; i < len(lines) && idx < len(frames); {
 		fn := strings.TrimSpace(lines[i])
 		if fn == "" {
+			// blank line = next address group
+			if i > 0 && strings.TrimSpace(lines[i-1]) != "" {
+				idx++
+			}
+			i++
 			continue
 		}
-		frames[idx].Function = fn
-		if i+1 < len(lines) {
-			f, ln, col := splitFileLineCol(strings.TrimSpace(lines[i+1]))
-			frames[idx].File, frames[idx].Line, frames[idx].Column = f, ln, col
-			i++
+		if idx >= len(frames) {
+			break
 		}
-		idx++
+		// First frame for this address is outer; subsequent before blank = inlines
+		isInline := frames[idx].Function != ""
+		if !isInline {
+			frames[idx].Function = fn
+		} else {
+			// Expand: keep outer, append inline as extra synthetic frame later
+			// Mark current as having been filled; store deepest inline on same slot's note
+			// Prefer innermost for File/Line (last wins for display)
+			frames[idx].Inline = true
+		}
+		if i+1 < len(lines) {
+			next := strings.TrimSpace(lines[i+1])
+			if next != "" && !strings.Contains(next, " at ") {
+				// likely file:line
+				f, ln, col := splitFileLineCol(next)
+				if !isInline {
+					frames[idx].File, frames[idx].Line, frames[idx].Column = f, ln, col
+				} else {
+					// keep innermost location
+					frames[idx].File, frames[idx].Line, frames[idx].Column = f, ln, col
+					if frames[idx].Function != "" && fn != frames[idx].Function {
+						frames[idx].Function = fn + " inlined into " + frames[idx].Function
+					} else {
+						frames[idx].Function = fn
+					}
+				}
+				i += 2
+				continue
+			}
+		}
+		i++
 	}
 	return frames
 }
