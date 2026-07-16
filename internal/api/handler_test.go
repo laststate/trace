@@ -16,6 +16,7 @@ import (
 	"github.com/laststate/trace/internal/db"
 	"github.com/laststate/trace/internal/lep"
 	"github.com/laststate/trace/internal/objects"
+	"github.com/laststate/trace/internal/queue"
 	"github.com/laststate/trace/internal/store"
 )
 
@@ -62,8 +63,31 @@ func testAPI(t *testing.T) (*api.Server, *store.Store, string) {
 	cfg.MaxBatchEvents = 10
 	cfg.RateLimitPerMin = 100000
 	cfg.MaxConnsPerIP = 1000
-	s := &api.Server{Cfg: cfg, Store: st, Object: obj}
+	s := &api.Server{Cfg: cfg, Store: st, Object: obj, Queue: queue.NewMemory()}
 	return s, st, secret
+}
+
+// testUISession creates a password user with org membership and returns a session secret.
+func testUISession(t *testing.T, st *store.Store, email, role string) string {
+	t.Helper()
+	ctx := context.Background()
+	p, err := st.DefaultProject(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if role == "" {
+		role = "viewer"
+	}
+	pw := store.GeneratePassword()
+	u, err := st.CreateUser(ctx, p.OrganizationID, email, pw, "Test", role)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, secret, err := st.MintSession(ctx, u, p.OrganizationID, role)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return secret
 }
 
 func TestHealthAndOpenAPI(t *testing.T) {
@@ -151,16 +175,9 @@ func TestUIRequiresLoginWhenClosed(t *testing.T) {
 		t.Fatalf("want 401 got %d", rr.Code)
 	}
 
-	// login
-	email := "api-" + time.Now().Format("150405") + "@t.local"
-	pw := store.GeneratePassword()
-	// ensure user via OIDC upsert
-	_, sess, secret, err := st.UpsertOIDCUser(context.Background(), email, "T")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = sess
-	// UpsertOIDCUser doesn't set password login — use session secret
+	// session with membership
+	email := "api-" + time.Now().Format("150405.000000") + "@t.local"
+	secret := testUISession(t, st, email, "viewer")
 	rr = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodGet, "/api/overview", nil)
 	req.Header.Set("Authorization", "Bearer "+secret)
@@ -168,7 +185,6 @@ func TestUIRequiresLoginWhenClosed(t *testing.T) {
 	if rr.Code != 200 {
 		t.Fatalf("overview %d %s", rr.Code, rr.Body.String())
 	}
-	_ = pw
 }
 
 func TestLoginJSON(t *testing.T) {
@@ -185,13 +201,8 @@ func TestLoginJSON(t *testing.T) {
 
 func TestAlertSSRFRejected(t *testing.T) {
 	s, st, _ := testAPI(t)
-	s.Cfg.OpenUI = true // GET open, but POST needs auth
-	_, _, secret, err := st.UpsertOIDCUser(context.Background(), "alert-"+time.Now().Format("150405")+"@t.local", "A")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// promote role? Upsert is developer; create alert needs admin
-	// set OpenUI false and use admin role — skip if 403
+	// create alert requires admin; private target must be rejected as SSRF
+	secret := testUISession(t, st, "alert-"+time.Now().Format("150405.000000")+"@t.local", "admin")
 	h := s.Handler()
 	payload, _ := json.Marshal(map[string]string{
 		"kind": "new_issue", "name": "x", "channel": "webhook",
@@ -201,9 +212,8 @@ func TestAlertSSRFRejected(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/alerts", bytes.NewReader(payload))
 	req.Header.Set("Authorization", "Bearer "+secret)
 	h.ServeHTTP(rr, req)
-	// 403 role or 400 ssrf
-	if rr.Code != 400 && rr.Code != 403 {
-		t.Fatalf("code %d %s", rr.Code, rr.Body.String())
+	if rr.Code != 400 {
+		t.Fatalf("want 400 ssrf, got %d %s", rr.Code, rr.Body.String())
 	}
 }
 
@@ -232,10 +242,7 @@ func TestBatchIngestJSON(t *testing.T) {
 
 func TestSearchAndPagination(t *testing.T) {
 	s, st, _ := testAPI(t)
-	_, _, secret, err := st.UpsertOIDCUser(context.Background(), "search-"+time.Now().Format("150405")+"@t.local", "S")
-	if err != nil {
-		t.Fatal(err)
-	}
+	secret := testUISession(t, st, "search-"+time.Now().Format("150405.000000")+"@t.local", "viewer")
 	h := s.Handler()
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/search?q=test", nil)

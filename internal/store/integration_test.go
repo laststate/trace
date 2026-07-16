@@ -68,7 +68,8 @@ func TestBootstrapLoginAndIngestIdempotency(t *testing.T) {
 	// create fresh user path via login of existing — skip if many users
 
 	eventID := "evt-test-" + uuid.NewString()
-	hash := "a" + uuid.NewString()[:63]
+	// payload_hash is 64 hex-like chars (uuid string is only 36)
+	hash := (uuid.NewString() + uuid.NewString())[:64]
 	res, err := st.CreateEventIdempotent(ctx, p.ID, eventID, 2, 1, 1, 1, "error", "k/"+hash, hash, 10, json.RawMessage(`{}`), "issue")
 	if err != nil {
 		t.Fatal(err)
@@ -82,7 +83,8 @@ func TestBootstrapLoginAndIngestIdempotency(t *testing.T) {
 		t.Fatal(err, res2)
 	}
 	// conflict different hash
-	_, err = st.CreateEventIdempotent(ctx, p.ID, eventID, 2, 1, 1, 1, "error", "k/other", "b"+uuid.NewString()[:63], 10, json.RawMessage(`{}`), "issue")
+	other := (uuid.NewString() + uuid.NewString())[:64]
+	_, err = st.CreateEventIdempotent(ctx, p.ID, eventID, 2, 1, 1, 1, "error", "k/other", other, 10, json.RawMessage(`{}`), "issue")
 	if err != store.ErrConflict {
 		t.Fatalf("want conflict got %v", err)
 	}
@@ -260,10 +262,17 @@ func TestSearchAndPages(t *testing.T) {
 
 func TestOrgProjectCRUD(t *testing.T) {
 	st, ctx := testStore(t)
-	// need a user
+	// create user with membership in existing org, then mint session
 	email := "u-" + uuid.NewString()[:8] + "@test.local"
-	// ensure admin may already exist — create via UpsertOIDCUser
-	u, sess, _, err := st.UpsertOIDCUser(ctx, email, "Test User")
+	p0, err := st.DefaultProject(ctx)
+	if err != nil {
+		t.Skip(err)
+	}
+	u, err := st.CreateUser(ctx, p0.OrganizationID, email, store.GeneratePassword(), "Test User", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, _, err := st.MintSession(ctx, u, p0.OrganizationID, "admin")
 	if err != nil {
 		t.Fatal(err)
 	}
