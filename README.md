@@ -1,12 +1,9 @@
 # Last State Trace
 
-Open-source observability for embedded firmware and hardware.
-
-Vertical path (v0.1):
+Observability backend for embedded firmware and hardware fleets.
 
 ```
-Relay → POST /v1/ingest → raw object storage → PostgreSQL → worker →
-decode → device/release → fingerprint → issue → web UI
+Latch (device) → Relay → Trace (ingest / workers / UI)
 ```
 
 ## Quickstart
@@ -15,51 +12,82 @@ decode → device/release → fingerprint → issue → web UI
 docker compose up --build
 ```
 
-On first boot Trace creates a default organization/project and prints an ingest token (also written to `./data/bootstrap-token.txt`).
+Bootstrap credentials (written once, never fully logged):
 
-Point Relay at Trace:
+| File | Contents |
+|------|----------|
+| `data/bootstrap-token.txt` | Ingest bearer token |
+| `data/bootstrap-admin.txt` | Admin email + password |
 
-```yaml
-destinations:
-  - id: trace
-    type: trace
-    url: http://localhost:8080
-    auth:
-      type: bearer
-      token: <ingest token>
-```
+UI APIs require authentication by default (`TRACE_OPEN_UI=false`).
 
-Open http://localhost:8080
+## Architecture
 
-## Local (no Docker for Trace binary)
+| Mode | Role |
+|------|------|
+| `TRACE_MODE=all` | API + workers (default) |
+| `TRACE_MODE=api` | HTTP only |
+| `TRACE_MODE=worker` | Job consumers + retention GC |
+
+| Queue (`TRACE_QUEUE`) | Notes |
+|-----------------------|--------|
+| `postgres` | Default; durable `SKIP LOCKED` |
+| `redis` | LIST + HASH + lease reclaim (`TRACE_QUEUE_URL`) |
+| `memory` | Single-process tests |
+| `nats` | In-process simulator only (`TRACE_QUEUE_URL=memory`) |
+| `cf` | Cloudflare Queues HTTP adapter (no silent RAM fallback) |
+
+Every response includes `X-Trace-ID` / `X-Span-ID`.
+
+## Security defaults
+
+- Public registration off (`TRACE_ALLOW_PUBLIC_REGISTER=false`)
+- OIDC requires existing membership (`TRACE_OIDC_AUTO_JOIN=false`)
+- SAML ACS experimental (`TRACE_SAML_INSECURE` forbidden in production)
+- Session cookie: HttpOnly, `SameSite=Lax`, optional Secure
+- `X-Forwarded-For` only from `TRACE_TRUSTED_PROXIES`
+- Channel/alert secrets encrypted when `TRACE_SECRETS_KEY` is set
+
+See [docs/SECURITY.md](docs/SECURITY.md).
+
+## Pipelines
+
+| Event types | Pipeline | Side effects |
+|-------------|----------|--------------|
+| crash / error / coredump | `issue` | fingerprint, issue, alerts |
+| health | `health` | health samples, device health |
+| log / message | `log` | log entries |
+| peripheral | `metric` | metric samples |
+| reset | `boot` | boot sessions |
+
+## Web UI
 
 ```bash
-# postgres required
-export TRACE_DATABASE_URL=postgres://trace:trace@localhost:5432/trace?sslmode=disable
-export TRACE_OBJECT_DIR=./data/objects
-go run ./cmd/trace
+cd web && npm ci && npm run build
 ```
 
-## Relay contract
+- React Router paths: `/overview`, `/issues/:id`, …
+- Brand assets: `assets/brand/` (served as `/assets/brand/*`)
+- Playwright: `cd web && npm run test:e2e` (UI shell; see [docs/E2E.md](docs/E2E.md) for full stack)
 
-- `GET /v1/relay/capabilities`
-- `POST /v1/ingest` (`application/octet-stream`, `Authorization: Bearer …`, `Idempotency-Key` / `X-Last-State-Event-ID`)
-- `POST /v1/events:batch` (JSON `accepted` / `duplicates` / `rejected`)
-- `2xx` and `409` = durable success / duplicate
+## Ops
 
-LEP validation follows [laststate/protocol](https://github.com/laststate/protocol).
+```bash
+./scripts/backup.sh ./backups/run1
+./scripts/restore.sh ./backups/run1
 
-## v0.3 (skipped backlog)
+TRACE_E2E_URL=http://localhost:8080 TRACE_E2E_TOKEN=… \
+  go test -tags e2e ./scripts -count=1
+```
 
-- Binary batch LSBT (`binary_batch: true`)
-- MinIO/S3 object store (`TRACE_S3_*`)
-- Alerts + HMAC webhooks
-- OIDC login (`TRACE_OIDC_*`)
-- Symbolizer sandbox (timeout, env wipe, caps)
-- React UI (Vite) in `web/`
+- Helm: `deploy/helm/trace/` (API + worker, Secret, backup PVC)
+- OpenAPI: `GET /openapi.json` (version **0.8.0**)
+- More docs: [BACKUP_RESTORE.md](docs/BACKUP_RESTORE.md), [OBSERVABILITY.md](docs/OBSERVABILITY.md), [SCALE.md](docs/SCALE.md)
 
-SAML: not implemented — use OIDC; add when ADFS/SAML-only IdP required.
+## Protocol
+
+LEP v1 wire format is implemented in `internal/lep`, aligned with [laststate/protocol](https://github.com/laststate/protocol).
 
 ## License
 
-AGPL-3.0 (see `LICENSE`).
+AGPL-3.0
