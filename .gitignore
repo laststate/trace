@@ -1,0 +1,7 @@
+.DS_Store
+/data/
+/bin/
+/dist/
+*.exe
+*.test
+bootstrap-token.txt

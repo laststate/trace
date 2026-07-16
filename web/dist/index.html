@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Last State Trace</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">Last State <span>Trace</span></div>
+      <nav>
+        <button data-view="overview" class="active">Overview</button>
+        <button data-view="issues">Issues</button>
+        <button data-view="events">Events</button>
+        <button data-view="devices">Devices</button>
+      </nav>
+      <div class="side-foot">v0.1 · dark</div>
+    </aside>
+    <main>
+      <header class="topbar">
+        <div id="crumb">Overview</div>
+        <div class="meta" id="meta"></div>
+      </header>
+      <section id="content" class="content"></section>
+    </main>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>
