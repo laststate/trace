@@ -6,4 +6,3 @@
 *.test
 bootstrap-token.txt
 web/node_modules/
-web/dist/assets/
