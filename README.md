@@ -90,4 +90,8 @@ LEP v1 wire format is implemented in `internal/lep`, aligned with [laststate/pro
 
 ## License
 
-AGPL-3.0
+AGPL-3.0 for this repository.
+
+Edge stack (protocol, Latch, Relay) is Apache-2.0. Shipping a closed-source SaaS
+on top of Trace requires AGPL compliance (source offer to network users or a
+commercial license from the copyright holders).

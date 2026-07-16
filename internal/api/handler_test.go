@@ -240,6 +240,62 @@ func TestBatchIngestJSON(t *testing.T) {
 	}
 }
 
+func TestIngestConflictDifferentHash(t *testing.T) {
+	// same event_id + different payload → 422 conflict (not 202, not silent 409 success)
+	s, _, secret := testAPI(t)
+	h := s.Handler()
+	// Different LEP sequences → different payload hashes for the same client event_id.
+	raw1, err := lep.Encode(lep.Header{Type: lep.TypeError, Architecture: 1, Sequence: 1, EventID: 42}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw2, err := lep.Encode(lep.Header{Type: lep.TypeError, Architecture: 1, Sequence: 2, EventID: 42}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idem := "evt-conflict-" + time.Now().Format("150405.000000")
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/ingest", bytes.NewReader(raw1))
+	req.Header.Set("Authorization", "Bearer "+secret)
+	req.Header.Set("Idempotency-Key", idem)
+	h.ServeHTTP(rr, req)
+	if rr.Code != 202 {
+		t.Fatalf("first ingest %d %s", rr.Code, rr.Body.String())
+	}
+
+	// true duplicate (same bytes)
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/ingest", bytes.NewReader(raw1))
+	req.Header.Set("Authorization", "Bearer "+secret)
+	req.Header.Set("Idempotency-Key", idem)
+	h.ServeHTTP(rr, req)
+	if rr.Code != 202 {
+		t.Fatalf("duplicate %d %s", rr.Code, rr.Body.String())
+	}
+	var dup map[string]any
+	_ = json.Unmarshal(rr.Body.Bytes(), &dup)
+	if dup["duplicate"] != true {
+		t.Fatalf("want duplicate body got %v", dup)
+	}
+
+	// conflict: same id, different payload
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/ingest", bytes.NewReader(raw2))
+	req.Header.Set("Authorization", "Bearer "+secret)
+	req.Header.Set("Idempotency-Key", idem)
+	h.ServeHTTP(rr, req)
+	if rr.Code != 422 {
+		t.Fatalf("want 422 conflict got %d %s", rr.Code, rr.Body.String())
+	}
+	var errBody map[string]any
+	_ = json.Unmarshal(rr.Body.Bytes(), &errBody)
+	errObj, _ := errBody["error"].(map[string]any)
+	if errObj == nil || errObj["code"] != "conflict" {
+		t.Fatalf("want error.code=conflict got %s", rr.Body.String())
+	}
+}
+
 func TestSearchAndPagination(t *testing.T) {
 	s, st, _ := testAPI(t)
 	secret := testUISession(t, st, "search-"+time.Now().Format("150405.000000")+"@t.local", "viewer")

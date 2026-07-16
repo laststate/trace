@@ -29,8 +29,8 @@ const openapiJSON = `{
         ],
         "requestBody": {"content": {"application/octet-stream": {"schema": {"type": "string", "format": "binary"}}}},
         "responses": {
-          "202": {"description": "Accepted or idempotent duplicate (status=duplicate)"},
-          "409": {"description": "Conflict (same event_id, different hash)"},
+          "202": {"description": "Accepted or idempotent duplicate (status=duplicate, duplicate=true)"},
+          "422": {"description": "Conflict: same event_id, different payload hash (error.code=conflict)"},
           "401": {"description": "Unauthorized"},
           "403": {"description": "Missing scope"}
         }

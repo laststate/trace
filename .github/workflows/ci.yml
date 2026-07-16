@@ -26,11 +26,21 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.22.x"
+      - name: Checkout protocol vectors
+        uses: actions/checkout@v4
+        with:
+          repository: laststate/protocol
+          path: protocol-ref
       - name: Vet
         run: go vet ./...
+      - name: Protocol LEP goldens
+        env:
+          PROTOCOL_VECTORS: ${{ github.workspace }}/protocol-ref/test-vectors
+        run: go test ./internal/lep -run TestProtocolVectors -count=1 -v
       - name: Test
         env:
           TRACE_DATABASE_URL: postgres://trace:trace@localhost:5432/trace?sslmode=disable
+          PROTOCOL_VECTORS: ${{ github.workspace }}/protocol-ref/test-vectors
         run: go test ./... -count=1
       - name: Race (broad)
         env:

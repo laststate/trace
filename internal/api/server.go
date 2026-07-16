@@ -256,14 +256,17 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 			status = 413
 		}
 		if code == "conflict" {
-			status = 409
+			// 422 (not 409): same event_id, different payload. Relay must NOT
+			// treat this as delivered — 409 was historically overloaded as
+			// "idempotent success" on some clients.
+			status = http.StatusUnprocessableEntity
 		}
 		writeErr(w, status, code, msg, retryable)
 		return
 	}
 	if res.Duplicate {
 		metrics.IngestDuplicate.Add(1)
-		// Same event_id + same hash is idempotent success (Relay treats 2xx as ok).
+		// Same event_id + same hash is idempotent success (HTTP 2xx only).
 		writeJSON(w, http.StatusAccepted, map[string]any{
 			"id": res.Event.ID.String(), "status": "duplicate", "duplicate": true,
 		})
