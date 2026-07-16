@@ -26,8 +26,11 @@ type Server struct {
 	Cfg    config.Config
 	Store  *store.Store
 	Object *objects.Store
-	Log    *slog.Logger
-	UI     http.FileSystem
+	Queue  interface {
+		Enqueue(ctx context.Context, typ string, payload any) error
+	}
+	Log *slog.Logger
+	UI  http.FileSystem
 }
 
 func (s *Server) Handler() http.Handler {
@@ -35,51 +38,125 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /health/live", s.live)
 	mux.HandleFunc("GET /health/ready", s.ready)
 	mux.HandleFunc("GET /metrics", metrics.Handler)
+	mux.HandleFunc("GET /openapi.json", s.openapi)
 
 	mux.HandleFunc("GET /v1/relay/capabilities", s.capabilities)
 	mux.HandleFunc("POST /v1/ingest", s.ingest)
 	mux.HandleFunc("POST /v1/events", s.ingest)
 	mux.HandleFunc("POST /v1/events:batch", s.ingestBatch)
 	mux.HandleFunc("POST /v1/artifacts", s.uploadArtifact)
+	mux.HandleFunc("POST /v1/relay/heartbeat", s.relayHeartbeat)
 
 	mux.HandleFunc("POST /api/auth/login", s.login)
+	mux.HandleFunc("POST /api/auth/logout", s.requireUI(s.apiLogout, "viewer"))
 	mux.HandleFunc("GET /api/me", s.me)
+	mux.HandleFunc("GET /api/jobs/dead", s.requireUI(s.apiDeadJobs, "admin"))
+	mux.HandleFunc("POST /api/jobs/dead/{id}/requeue", s.requireUI(s.apiRequeueDead, "admin"))
+	mux.HandleFunc("DELETE /api/jobs/dead/{id}", s.requireUI(s.apiDiscardDead, "admin"))
+	mux.HandleFunc("GET /api/alerts/skips", s.requireUI(s.apiAlertSkips, "admin"))
+	mux.HandleFunc("GET /api/settings", s.requireUI(s.apiGetSettings, "viewer"))
+	mux.HandleFunc("PUT /api/settings", s.requireUI(s.apiPutSettings, "admin"))
+	mux.HandleFunc("GET /api/labels", s.requireUI(s.apiListLabels, "viewer"))
+	mux.HandleFunc("POST /api/labels", s.requireUI(s.apiCreateLabel, "developer"))
+	mux.HandleFunc("GET /api/releases/compare", s.requireUI(s.apiCompareReleases, "viewer"))
+	mux.HandleFunc("GET /api/boots", s.requireUI(s.apiBootSessions, "viewer"))
 	mux.HandleFunc("GET /api/overview", s.requireUI(s.apiOverview, "viewer"))
-	mux.HandleFunc("GET /api/issues", s.requireUI(s.apiIssues, "viewer"))
+	mux.HandleFunc("GET /api/search", s.requireUI(s.apiSearchFull, "viewer"))
+	mux.HandleFunc("GET /api/query/events", s.requireUI(s.apiQueryEvents, "viewer"))
+	mux.HandleFunc("GET /scim/v2/Users", s.requireUI(s.apiSCIMUsers, "admin"))
+	mux.HandleFunc("POST /scim/v2/Users", s.requireUI(s.apiSCIMUsers, "admin"))
+	mux.HandleFunc("GET /api/oncall", s.requireUI(s.apiOncall, "viewer"))
+	mux.HandleFunc("POST /api/oncall", s.requireUI(s.apiOncall, "admin"))
+	mux.HandleFunc("POST /api/oncall/shifts", s.requireUI(s.apiOncallShift, "admin"))
+	mux.HandleFunc("GET /api/escalation", s.requireUI(s.apiEscalation, "viewer"))
+	mux.HandleFunc("POST /api/escalation", s.requireUI(s.apiEscalation, "admin"))
+	mux.HandleFunc("GET /api/issues/{id}/suspect-commits", s.requireUI(s.apiSuspectCommits, "viewer"))
+	mux.HandleFunc("GET /api/issues/{id}/replay", s.requireUI(s.apiIssueReplay, "viewer"))
+	mux.HandleFunc("POST /api/releases/{id}/commits", s.requireUI(s.apiReleaseCommits, "maintainer"))
+	mux.HandleFunc("POST /api/analytics/export", s.requireUI(s.apiAnalyticsExport, "admin"))
+	mux.HandleFunc("GET /api/saml/config", s.requireUI(s.apiSAMLConfig, "admin"))
+	mux.HandleFunc("PUT /api/saml/config", s.requireUI(s.apiSAMLConfig, "admin"))
+	mux.HandleFunc("GET /saml/metadata", s.apiSAMLMetadata)
+	mux.HandleFunc("GET /saml/login", s.apiSAMLLogin)
+	mux.HandleFunc("POST /saml/acs", s.apiSAMLACS)
+	mux.HandleFunc("GET /api/issues", s.requireUI(s.apiIssuesPage, "viewer"))
 	mux.HandleFunc("GET /api/issues/{id}", s.requireUI(s.apiIssue, "viewer"))
 	mux.HandleFunc("POST /api/issues/{id}/status", s.requireUI(s.apiIssueStatus, "developer"))
-	mux.HandleFunc("GET /api/events", s.requireUI(s.apiEvents, "viewer"))
+	mux.HandleFunc("POST /api/issues/{id}/comments", s.requireUI(s.apiIssueComment, "developer"))
+	mux.HandleFunc("POST /api/issues/{id}/assign", s.requireUI(s.apiIssueAssign, "developer"))
+	mux.HandleFunc("POST /api/issues/{id}/merge", s.requireUI(s.apiIssueMerge, "maintainer"))
+	mux.HandleFunc("POST /api/issues/{id}/split", s.requireUI(s.apiIssueSplit, "maintainer"))
+	mux.HandleFunc("POST /api/issues/{id}/labels", s.requireUI(s.apiIssueLabels, "developer"))
+	mux.HandleFunc("GET /api/events", s.requireUI(s.apiEventsPage, "viewer"))
 	mux.HandleFunc("GET /api/events/{id}", s.requireUI(s.apiEvent, "viewer"))
 	mux.HandleFunc("GET /api/events/{id}/raw", s.requireUI(s.apiEventRaw, "viewer"))
-	mux.HandleFunc("GET /api/devices", s.requireUI(s.apiDevices, "viewer"))
+	mux.HandleFunc("POST /api/events/{id}/reprocess", s.requireUI(s.apiEventReprocess, "maintainer"))
+	mux.HandleFunc("POST /api/events/reprocess-stale", s.requireUI(s.apiReprocessBatch, "maintainer"))
+	mux.HandleFunc("GET /api/devices", s.requireUI(s.apiDevicesPage, "viewer"))
 	mux.HandleFunc("GET /api/devices/{id}", s.requireUI(s.apiDevice, "viewer"))
+	mux.HandleFunc("PATCH /api/devices/{id}", s.requireUI(s.apiDevicePatch, "developer"))
+	mux.HandleFunc("GET /api/devices/{id}/firmware-history", s.requireUI(s.apiDeviceHistory, "viewer"))
 	mux.HandleFunc("GET /api/releases", s.requireUI(s.apiReleases, "viewer"))
 	mux.HandleFunc("GET /api/releases/{id}", s.requireUI(s.apiRelease, "viewer"))
+	mux.HandleFunc("PATCH /api/releases/{id}", s.requireUI(s.apiReleasePatch, "maintainer"))
+	mux.HandleFunc("GET /api/releases/{id}/stats", s.requireUI(s.apiReleaseStats, "viewer"))
 	mux.HandleFunc("GET /api/artifacts", s.requireUI(s.apiArtifacts, "viewer"))
 	mux.HandleFunc("POST /api/artifacts", s.requireUI(s.apiUploadArtifact, "maintainer"))
+	mux.HandleFunc("POST /api/artifacts/{id}/promote", s.requireUI(s.apiPromoteArtifact, "maintainer"))
 	mux.HandleFunc("GET /api/audit", s.requireUI(s.apiAudit, "admin"))
 	mux.HandleFunc("POST /api/tokens", s.requireUI(s.apiCreateToken, "admin"))
+	mux.HandleFunc("GET /api/tokens", s.requireUI(s.apiListTokens, "admin"))
+	mux.HandleFunc("DELETE /api/tokens/{id}", s.requireUI(s.apiRevokeToken, "admin"))
+	mux.HandleFunc("POST /api/auth/register", s.apiRegister)
+	mux.HandleFunc("POST /api/auth/invite/accept", s.apiAcceptInvite)
 	mux.HandleFunc("GET /api/bootstrap", s.apiBootstrapInfo)
 	mux.HandleFunc("GET /api/alerts", s.requireUI(s.apiAlerts, "viewer"))
 	mux.HandleFunc("POST /api/alerts", s.requireUI(s.apiCreateAlert, "admin"))
+	mux.HandleFunc("PATCH /api/alerts/{id}", s.requireUI(s.apiUpdateAlert, "admin"))
 	mux.HandleFunc("GET /api/webhooks/deliveries", s.requireUI(s.apiWebhookDeliveries, "admin"))
+	mux.HandleFunc("GET /api/channels", s.requireUI(s.apiChannels, "viewer"))
+	mux.HandleFunc("POST /api/channels", s.requireUI(s.apiCreateChannel, "admin"))
 	mux.HandleFunc("GET /api/auth/oidc/login", s.oidcLogin)
 	mux.HandleFunc("GET /api/auth/oidc/callback", s.oidcCallback)
+
+	// Orgs / projects / relays / hardware
+	mux.HandleFunc("GET /api/organizations", s.requireUI(s.apiListOrgs, "viewer"))
+	mux.HandleFunc("POST /api/organizations", s.requireUI(s.apiCreateOrg, "viewer"))
+	mux.HandleFunc("PATCH /api/organizations", s.requireUI(s.apiUpdateOrg, "admin"))
+	mux.HandleFunc("GET /api/organizations/members", s.requireUI(s.apiListMembers, "admin"))
+	mux.HandleFunc("POST /api/organizations/members", s.requireUI(s.apiInviteMember, "admin"))
+	mux.HandleFunc("PATCH /api/organizations/members", s.requireUI(s.apiUpdateMember, "admin"))
+	mux.HandleFunc("DELETE /api/organizations/members", s.requireUI(s.apiRemoveMember, "admin"))
+	mux.HandleFunc("GET /api/projects", s.requireUI(s.apiListProjects, "viewer"))
+	mux.HandleFunc("POST /api/projects", s.requireUI(s.apiCreateProject, "admin"))
+	mux.HandleFunc("PATCH /api/projects/{id}", s.requireUI(s.apiUpdateProject, "admin"))
+	mux.HandleFunc("DELETE /api/projects/{id}", s.requireUI(s.apiDeleteProject, "owner"))
+	mux.HandleFunc("GET /api/relays", s.requireUI(s.apiListRelays, "viewer"))
+	mux.HandleFunc("GET /api/hardware", s.requireUI(s.apiListHardware, "viewer"))
+	mux.HandleFunc("POST /api/hardware", s.requireUI(s.apiCreateHardware, "maintainer"))
+	mux.HandleFunc("GET /api/hardware/compare", s.requireUI(s.apiHardwareCompare, "viewer"))
 
 	if s.UI != nil {
 		fileServer := http.FileServer(s.UI)
 		mux.Handle("GET /", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/v1/") || strings.HasPrefix(r.URL.Path, "/health/") || r.URL.Path == "/metrics" {
+			if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/v1/") || strings.HasPrefix(r.URL.Path, "/health/") || r.URL.Path == "/metrics" || r.URL.Path == "/openapi.json" {
 				http.NotFound(w, r)
 				return
 			}
+			// SPA fallback: client routes like /issues/:id serve index.html
 			if r.URL.Path != "/" && !strings.Contains(r.URL.Path, ".") {
 				r.URL.Path = "/"
+			}
+			// Don't cache index.html so deploys pick up new asset hashes
+			if r.URL.Path == "/" || strings.HasSuffix(r.URL.Path, "index.html") {
+				w.Header().Set("Cache-Control", "no-cache")
+			} else if strings.Contains(r.URL.Path, "/assets/") {
+				w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 			}
 			fileServer.ServeHTTP(w, r)
 		}))
 	}
-	return withRequestID(mux)
+	return withSecurity(withRequestID(mux), s.Cfg.RateLimitPerMin, s.Cfg.MaxConnsPerIP)
 }
 
 func (s *Server) live(w http.ResponseWriter, _ *http.Request) {
@@ -87,30 +164,73 @@ func (s *Server) live(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
+	checks := map[string]string{}
+	ok := true
 	if err := s.Store.Pool.Ping(r.Context()); err != nil {
-		writeErr(w, 503, "not_ready", err.Error(), true)
+		checks["postgres"] = err.Error()
+		ok = false
+	} else {
+		checks["postgres"] = "ok"
+	}
+	if s.Object != nil {
+		if err := s.Object.Ensure(); err != nil {
+			checks["object_store"] = err.Error()
+			ok = false
+		} else {
+			checks["object_store"] = "ok"
+		}
+	}
+	if s.Queue != nil {
+		checks["queue"] = "configured"
+	} else {
+		checks["queue"] = "missing"
+		ok = false
+	}
+	// migrations applied marker
+	var n int
+	if err := s.Store.Pool.QueryRow(r.Context(), `SELECT COUNT(*) FROM information_schema.tables WHERE table_name='events'`).Scan(&n); err != nil || n == 0 {
+		checks["migrations"] = "events table missing"
+		ok = false
+	} else {
+		checks["migrations"] = "ok"
+	}
+	if !ok {
+		writeJSON(w, 503, map[string]any{"status": "not_ready", "checks": checks})
 		return
 	}
-	writeJSON(w, 200, map[string]string{"status": "ready"})
+	writeJSON(w, 200, map[string]any{"status": "ready", "checks": checks, "version": s.Cfg.AppVersion})
 }
 
 func (s *Server) capabilities(w http.ResponseWriter, _ *http.Request) {
 	max := s.Cfg.MaxEventSize
 	writeJSON(w, 200, map[string]any{
 		"api_version": "1", "lep_versions": []int{1}, "max_event_size": max,
-		"max_batch_events": 100, "max_batch_bytes": max * 50, "compression": []string{"identity"},
-		"batch_ingest": true, "binary_batch": true, "artifact_upload": true,
-		"authentication": []string{"bearer"}, "server_id": "trace-v0.3",
-		"oidc": s.Cfg.OIDCIssuer != "",
+		"max_batch_events": s.Cfg.MaxBatchEvents, "max_batch_bytes": s.Cfg.MaxBatchBytes,
+		// zstd advertised when binary batch path supports it via content-encoding
+		"compression":     []string{"identity", "zstd"},
+		"batch_ingest":    true,
+		"binary_batch":    true,
+		"artifact_upload": true,
+		"authentication":  []string{"bearer", "cookie"},
+		"server_id":       "trace-v" + s.Cfg.AppVersion,
+		"oidc":            s.Cfg.OIDCIssuer != "",
+		"saml":            false, // experimental; not enterprise-ready
+		"scim":            false, // stub only
+		"public_register": s.Cfg.AllowPublicRegister,
+		"queue":           s.Cfg.QueueDriver,
 	})
 }
 
 func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 	metrics.IngestTotal.Add(1)
-	tok, err := s.requireIngest(r)
+	tok, err := s.requireIngest(r, "event:write")
 	if err != nil {
 		metrics.IngestRejected.Add(1)
-		writeErr(w, 401, "unauthorized", err.Error(), false)
+		status := 401
+		if errors.Is(err, errForbidden) {
+			status = 403
+		}
+		writeErr(w, status, "unauthorized", err.Error(), false)
 		return
 	}
 	body := http.MaxBytesReader(w, r.Body, s.Cfg.MaxEventSize)
@@ -135,18 +255,24 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 		if code == "too_large" {
 			status = 413
 		}
+		if code == "conflict" {
+			status = 409
+		}
 		writeErr(w, status, code, msg, retryable)
 		return
 	}
 	if res.Duplicate {
 		metrics.IngestDuplicate.Add(1)
-		w.WriteHeader(http.StatusConflict)
-		_, _ = w.Write([]byte(res.Event.ID.String()))
+		// Same event_id + same hash is idempotent success (Relay treats 2xx as ok).
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"id": res.Event.ID.String(), "status": "duplicate", "duplicate": true,
+		})
 		return
 	}
 	metrics.IngestAccepted.Add(1)
-	w.WriteHeader(http.StatusAccepted)
-	_, _ = w.Write([]byte(res.Event.ID.String()))
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"id": res.Event.ID.String(), "status": "accepted", "duplicate": false,
+	})
 }
 
 type batchRequest struct {
@@ -158,12 +284,20 @@ type batchRequest struct {
 
 func (s *Server) ingestBatch(w http.ResponseWriter, r *http.Request) {
 	metrics.IngestTotal.Add(1)
-	tok, err := s.requireIngest(r)
+	tok, err := s.requireIngest(r, "event:write")
 	if err != nil {
-		writeErr(w, 401, "unauthorized", err.Error(), false)
+		status := 401
+		if errors.Is(err, errForbidden) {
+			status = 403
+		}
+		writeErr(w, status, "unauthorized", err.Error(), false)
 		return
 	}
-	body := http.MaxBytesReader(w, r.Body, s.Cfg.MaxEventSize*100)
+	maxBody := s.Cfg.MaxBatchBytes
+	if maxBody <= 0 {
+		maxBody = s.Cfg.MaxEventSize * 50
+	}
+	body := http.MaxBytesReader(w, r.Body, maxBody)
 	defer body.Close()
 	raw, err := io.ReadAll(body)
 	if err != nil {
@@ -177,7 +311,11 @@ func (s *Server) ingestBatch(w http.ResponseWriter, r *http.Request) {
 	var events []item
 	ct := r.Header.Get("Content-Type")
 	if strings.Contains(ct, "vnd.laststate.batch") || (len(raw) >= 4 && string(raw[:4]) == batch.Magic) {
-		be, err := batch.Decode(raw)
+		lim := batch.DefaultLimits()
+		lim.MaxEvents = uint32(s.Cfg.MaxBatchEvents)
+		lim.MaxPayload = int(s.Cfg.MaxEventSize)
+		lim.MaxTotal = int(maxBody)
+		be, err := batch.DecodeLimited(raw, lim)
 		if err != nil {
 			writeErr(w, 400, "invalid_batch", err.Error(), false)
 			return
@@ -191,7 +329,15 @@ func (s *Server) ingestBatch(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 400, "invalid_json", err.Error(), false)
 			return
 		}
+		if len(req.Events) > s.Cfg.MaxBatchEvents {
+			writeErr(w, 400, "batch_too_large", "too many events in batch", false)
+			return
+		}
 		for _, e := range req.Events {
+			if int64(len(e.Payload)) > s.Cfg.MaxEventSize {
+				writeErr(w, 400, "event_too_large", "payload exceeds max", false)
+				return
+			}
 			events = append(events, item{EventID: e.EventID, Payload: e.Payload})
 		}
 	}
@@ -215,6 +361,23 @@ func (s *Server) ingestBatch(w http.ResponseWriter, r *http.Request) {
 	}
 	resp["accepted"], resp["duplicates"], resp["rejected"] = accepted, dups, rejected
 	writeJSON(w, 200, resp)
+}
+
+func pipelineForType(t uint8) string {
+	switch t {
+	case lep.TypeHealth:
+		return "health"
+	case lep.TypeLog, lep.TypeMessage:
+		return "log"
+	case lep.TypePeripheral:
+		return "metric"
+	case lep.TypeReset:
+		return "boot"
+	case lep.TypeCrash, lep.TypeCoredump, lep.TypeError:
+		return "issue"
+	default:
+		return "issue"
+	}
 }
 
 func (s *Server) acceptOne(r *http.Request, projectID uuid.UUID, eventID string, raw []byte) (store.IngestResult, string, string, bool, error) {
@@ -245,23 +408,43 @@ func (s *Server) acceptOne(r *http.Request, projectID uuid.UUID, eventID string,
 	if h.Type == lep.TypeCrash || h.Type == lep.TypeCoredump {
 		severity = "fatal"
 	}
+	pipeline := pipelineForType(h.Type)
 	decoded, _ := json.Marshal(map[string]any{"header": h})
-	res, err := s.Store.CreateEventIdempotent(r.Context(), projectID, eventID, int16(h.Type), int16(h.Architecture), int64(h.Sequence), int64(h.EventID), severity, key, hash, int64(len(raw)), decoded)
+	res, err := s.Store.CreateEventIdempotent(r.Context(), projectID, eventID, int16(h.Type), int16(h.Architecture), int64(h.Sequence), int64(h.EventID), severity, key, hash, int64(len(raw)), decoded, pipeline)
 	if err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			return store.IngestResult{}, "conflict", err.Error(), false, err
+		}
 		return store.IngestResult{}, "internal", err.Error(), true, err
+	}
+	if !res.Duplicate {
+		if err := s.enqueueProcess(r.Context(), projectID, res.Event.ID); err != nil {
+			return store.IngestResult{}, "queue_error", err.Error(), true, err
+		}
 	}
 	return res, "", "", false, nil
 }
 
-func (s *Server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
-	// bearer ingest/artifact token
-	tok, err := s.requireIngest(r)
-	if err != nil {
-		writeErr(w, 401, "unauthorized", err.Error(), false)
-		return
+func (s *Server) enqueueProcess(ctx context.Context, projectID, eventID uuid.UUID) error {
+	payload := map[string]string{
+		"event_id":   eventID.String(),
+		"project_id": projectID.String(),
 	}
-	if !store.TokenHasScope(tok, "artifact:write") {
-		writeErr(w, 403, "forbidden", "artifact:write required", false)
+	if s.Queue != nil {
+		return s.Queue.Enqueue(ctx, "process_event", payload)
+	}
+	// Fallback: postgres jobs table (api-only without queue configured)
+	return s.Store.EnqueueJob(ctx, "process_event", payload)
+}
+
+func (s *Server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
+	tok, err := s.requireIngest(r, "artifact:write")
+	if err != nil {
+		status := 401
+		if errors.Is(err, errForbidden) {
+			status = 403
+		}
+		writeErr(w, status, "unauthorized", err.Error(), false)
 		return
 	}
 	a, err := s.saveArtifact(r, tok.ProjectID)
@@ -272,8 +455,35 @@ func (s *Server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 	metrics.ArtifactUploads.Add(1)
 	tid := tok.ID
 	pid := tok.ProjectID
-	s.Store.Audit(r.Context(), nil, &tid, nil, &pid, "artifact.upload", "artifact", a.ID.String(), clientIP(r), r.UserAgent(), map[string]any{"build_id": a.BuildID})
+	s.Store.Audit(r.Context(), nil, &tid, nil, &pid, "artifact.upload", "artifact", a.ID.String(), clientIP(r), r.UserAgent(), map[string]any{"build_id": a.BuildID, "status": a.Status})
 	writeJSON(w, 201, a)
+}
+
+func (s *Server) relayHeartbeat(w http.ResponseWriter, r *http.Request) {
+	tok, err := s.requireIngest(r, "event:write")
+	if err != nil {
+		writeErr(w, 401, "unauthorized", err.Error(), false)
+		return
+	}
+	var body struct {
+		RelayID      string          `json:"relay_id"`
+		Name         string          `json:"name"`
+		Version      string          `json:"version"`
+		Capabilities json.RawMessage `json:"capabilities"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, 400, "invalid_json", err.Error(), false)
+		return
+	}
+	if body.RelayID == "" {
+		body.RelayID = "relay-" + tok.Prefix
+	}
+	rel, err := s.Store.UpsertRelay(r.Context(), tok.ProjectID, body.RelayID, body.Name, body.Version, body.Capabilities)
+	if err != nil {
+		writeErr(w, 500, "internal", err.Error(), true)
+		return
+	}
+	writeJSON(w, 200, rel)
 }
 
 func (s *Server) saveArtifact(r *http.Request, projectID uuid.UUID) (store.Artifact, error) {
@@ -296,38 +506,61 @@ func (s *Server) saveArtifact(r *http.Request, projectID uuid.UUID) (store.Artif
 	}
 	defer os.Remove(tmp)
 	meta, err := artifact.InspectFile(tmp)
+	status := "ready"
 	if err != nil {
-		// allow non-ELF with explicit header build id
+		// quarantine non-ELF unless explicit build id header
 		if bid := r.Header.Get("X-Last-State-Build-ID"); bid != "" {
 			meta.BuildID = strings.ToLower(bid)
 			meta.Architecture = r.Header.Get("X-Last-State-Architecture")
+			status = "quarantine"
 		} else {
-			return store.Artifact{}, err
+			// store as quarantine with reason
+			a, cerr := s.Store.CreateArtifact(r.Context(), projectID, "unknown", "", "", hash, key, int64(len(raw)), "quarantine")
+			if cerr != nil {
+				return store.Artifact{}, err
+			}
+			_ = s.Store.QuarantineArtifact(r.Context(), projectID, a.ID, err.Error())
+			return a, nil
 		}
 	}
-	return s.Store.CreateArtifact(r.Context(), projectID, "elf", meta.BuildID, meta.Architecture, hash, key, int64(len(raw)))
+	if meta.BuildID == "" {
+		status = "quarantine"
+	}
+	return s.Store.CreateArtifact(r.Context(), projectID, "elf", meta.BuildID, meta.Architecture, hash, key, int64(len(raw)), status)
 }
 
-func (s *Server) requireIngest(r *http.Request) (store.Token, error) {
+var errForbidden = errors.New("forbidden")
+
+func (s *Server) requireIngest(r *http.Request, scope string) (store.Token, error) {
 	secret, err := auth.Bearer(r.Header.Get("Authorization"))
 	if err != nil {
 		return store.Token{}, err
 	}
-	return s.Store.AuthIngestToken(r.Context(), secret)
+	tok, err := s.Store.AuthIngestToken(r.Context(), secret)
+	if err != nil {
+		return store.Token{}, err
+	}
+	if scope != "" && !store.TokenHasScope(tok, scope) {
+		return store.Token{}, errForbidden
+	}
+	return tok, nil
 }
 
 type ctxKey int
 
-const sessKey ctxKey = 1
+const (
+	sessKey    ctxKey = 1
+	projectKey ctxKey = 2
+)
 
 func (s *Server) requireUI(next http.HandlerFunc, minRole string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// OpenUI: GET is open for local/dev; mutating methods always need session.
+		// OpenUI is explicit opt-in for local/dev only
 		if s.Cfg.OpenUI && r.Method == http.MethodGet {
 			next(w, r)
 			return
 		}
-		secret, err := auth.Bearer(r.Header.Get("Authorization"))
+		secret, err := sessionSecretFrom(r)
 		if err != nil {
 			writeErr(w, 401, "unauthorized", "login required", false)
 			return
@@ -345,7 +578,40 @@ func (s *Server) requireUI(next http.HandlerFunc, minRole string) http.HandlerFu
 	}
 }
 
+func sessionFrom(r *http.Request) (store.Session, bool) {
+	v, ok := r.Context().Value(sessKey).(store.Session)
+	return v, ok
+}
+
 func (s *Server) project(r *http.Request) (store.Project, error) {
+	// Prefer X-Project-ID when session present (multi-tenant)
+	if sess, ok := sessionFrom(r); ok {
+		var pid *uuid.UUID
+		if h := r.Header.Get("X-Project-ID"); h != "" {
+			if id, err := uuid.Parse(h); err == nil {
+				pid = &id
+			}
+		}
+		if q := r.URL.Query().Get("project_id"); q != "" && pid == nil {
+			if id, err := uuid.Parse(q); err == nil {
+				pid = &id
+			}
+		}
+		p, err := s.Store.ProjectForSession(r.Context(), sess.OrganizationID, pid)
+		if err != nil {
+			return store.Project{}, err
+		}
+		// verify membership can access
+		ok, _, err := s.Store.UserCanAccessProject(r.Context(), sess.UserID, p.ID)
+		if err != nil {
+			return store.Project{}, err
+		}
+		if !ok {
+			return store.Project{}, store.ErrNotFound
+		}
+		return p, nil
+	}
+	// OpenUI fallback: default project only
 	return s.Store.DefaultProject(r.Context())
 }
 
@@ -366,14 +632,44 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	uid := sess.UserID
 	oid := sess.OrganizationID
 	s.Store.Audit(r.Context(), &uid, nil, &oid, nil, "auth.login", "user", uid.String(), clientIP(r), r.UserAgent(), nil)
+	s.setSessionCookie(w, secret)
 	writeJSON(w, 200, map[string]any{
-		"token": secret,
-		"user":  map[string]any{"id": sess.UserID, "email": sess.Email, "name": sess.Name, "role": sess.Role},
+		"token": secret, // also returned for non-browser API clients
+		"user":  map[string]any{"id": sess.UserID, "email": sess.Email, "name": sess.Name, "role": sess.Role, "organization_id": sess.OrganizationID},
 	})
 }
 
+func (s *Server) setSessionCookie(w http.ResponseWriter, secret string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "trace_session",
+		Value:    secret,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   s.Cfg.CookieSecure,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   60 * 60 * 24 * 14,
+	})
+}
+
+func (s *Server) clearSessionCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name: "trace_session", Value: "", Path: "/", HttpOnly: true,
+		Secure: s.Cfg.CookieSecure, SameSite: http.SameSiteLaxMode, MaxAge: -1,
+	})
+}
+
+func sessionSecretFrom(r *http.Request) (string, error) {
+	if secret, err := auth.Bearer(r.Header.Get("Authorization")); err == nil && secret != "" {
+		return secret, nil
+	}
+	if c, err := r.Cookie("trace_session"); err == nil && c.Value != "" {
+		return c.Value, nil
+	}
+	return "", errors.New("no session")
+}
+
 func (s *Server) me(w http.ResponseWriter, r *http.Request) {
-	secret, err := auth.Bearer(r.Header.Get("Authorization"))
+	secret, err := sessionSecretFrom(r)
 	if err != nil {
 		writeErr(w, 401, "unauthorized", err.Error(), false)
 		return
@@ -383,7 +679,10 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 401, "unauthorized", "invalid session", false)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"id": sess.UserID, "email": sess.Email, "name": sess.Name, "role": sess.Role})
+	writeJSON(w, 200, map[string]any{
+		"id": sess.UserID, "email": sess.Email, "name": sess.Name, "role": sess.Role,
+		"organization_id": sess.OrganizationID,
+	})
 }
 
 func (s *Server) apiOverview(w http.ResponseWriter, r *http.Request) {
@@ -401,36 +700,34 @@ func (s *Server) apiOverview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, ov)
 }
 
-func (s *Server) apiIssues(w http.ResponseWriter, r *http.Request) {
+func (s *Server) apiIssue(w http.ResponseWriter, r *http.Request) {
 	p, err := s.project(r)
 	if err != nil {
 		writeErr(w, 404, "no_project", err.Error(), false)
 		return
 	}
-	items, err := s.Store.ListIssues(r.Context(), p.ID, 100)
-	if err != nil {
-		writeErr(w, 500, "internal", err.Error(), true)
-		return
-	}
-	writeJSON(w, 200, map[string]any{"items": items})
-}
-
-func (s *Server) apiIssue(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		writeErr(w, 400, "bad_id", "invalid id", false)
 		return
 	}
-	item, err := s.Store.GetIssue(r.Context(), id)
+	item, err := s.Store.GetIssueInProject(r.Context(), p.ID, id)
 	if err != nil {
 		writeErr(w, 404, "not_found", err.Error(), false)
 		return
 	}
-	events, _ := s.Store.ListEventsByIssue(r.Context(), id, 50)
-	writeJSON(w, 200, map[string]any{"issue": item, "events": events})
+	events, _ := s.Store.ListEventsByIssueInProject(r.Context(), p.ID, id, 50)
+	comments, _ := s.Store.ListIssueComments(r.Context(), id)
+	activity, _ := s.Store.ListIssueActivity(r.Context(), id, 50)
+	writeJSON(w, 200, map[string]any{"issue": item, "events": events, "comments": comments, "activity": activity})
 }
 
 func (s *Server) apiIssueStatus(w http.ResponseWriter, r *http.Request) {
+	p, err := s.project(r)
+	if err != nil {
+		writeErr(w, 404, "no_project", err.Error(), false)
+		return
+	}
 	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		writeErr(w, 400, "bad_id", "invalid id", false)
@@ -449,12 +746,18 @@ func (s *Server) apiIssueStatus(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "bad_status", "invalid status", false)
 		return
 	}
-	item, err := s.Store.UpdateIssueStatus(r.Context(), id, body.Status)
+	item, err := s.Store.UpdateIssueStatus(r.Context(), p.ID, id, body.Status)
 	if err != nil {
 		writeErr(w, 404, "not_found", err.Error(), false)
 		return
 	}
-	s.Store.Audit(r.Context(), nil, nil, nil, &item.ProjectID, "issue.status", "issue", id.String(), clientIP(r), r.UserAgent(), map[string]any{"status": body.Status})
+	var actor *uuid.UUID
+	if sess, ok := sessionFrom(r); ok {
+		actor = &sess.UserID
+	}
+	oid := p.OrganizationID
+	pid := p.ID
+	s.Store.Audit(r.Context(), actor, nil, &oid, &pid, "issue.status", "issue", id.String(), clientIP(r), r.UserAgent(), map[string]any{"status": body.Status})
 	if body.Status == "resolved" {
 		_ = s.Store.EnqueueJob(r.Context(), "notify_issue", map[string]string{
 			"project_id": item.ProjectID.String(),
@@ -465,41 +768,72 @@ func (s *Server) apiIssueStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, item)
 }
 
-func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
+func (s *Server) apiIssueComment(w http.ResponseWriter, r *http.Request) {
 	p, err := s.project(r)
 	if err != nil {
 		writeErr(w, 404, "no_project", err.Error(), false)
 		return
 	}
-	items, err := s.Store.ListEvents(r.Context(), p.ID, 100)
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, 400, "bad_id", "invalid id", false)
+		return
+	}
+	if _, err := s.Store.GetIssueInProject(r.Context(), p.ID, id); err != nil {
+		writeErr(w, 404, "not_found", err.Error(), false)
+		return
+	}
+	var body struct {
+		Body string `json:"body"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Body) == "" {
+		writeErr(w, 400, "invalid_body", "body required", false)
+		return
+	}
+	var author *uuid.UUID
+	if sess, ok := sessionFrom(r); ok {
+		author = &sess.UserID
+	}
+	cid, err := s.Store.AddIssueComment(r.Context(), p.ID, id, author, body.Body)
 	if err != nil {
 		writeErr(w, 500, "internal", err.Error(), true)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"items": items})
+	writeJSON(w, 201, map[string]any{"id": cid})
 }
 
 func (s *Server) apiEvent(w http.ResponseWriter, r *http.Request) {
+	p, err := s.project(r)
+	if err != nil {
+		writeErr(w, 404, "no_project", err.Error(), false)
+		return
+	}
 	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		writeErr(w, 400, "bad_id", "invalid id", false)
 		return
 	}
-	item, err := s.Store.GetEventByID(r.Context(), id)
+	item, err := s.Store.GetEventInProject(r.Context(), p.ID, id)
 	if err != nil {
 		writeErr(w, 404, "not_found", err.Error(), false)
 		return
 	}
-	writeJSON(w, 200, item)
+	hist, _ := s.Store.EventHistory(r.Context(), id)
+	writeJSON(w, 200, map[string]any{"event": item, "history": hist})
 }
 
 func (s *Server) apiEventRaw(w http.ResponseWriter, r *http.Request) {
+	p, err := s.project(r)
+	if err != nil {
+		writeErr(w, 404, "no_project", err.Error(), false)
+		return
+	}
 	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		writeErr(w, 400, "bad_id", "invalid id", false)
 		return
 	}
-	item, err := s.Store.GetEventByID(r.Context(), id)
+	item, err := s.Store.GetEventInProject(r.Context(), p.ID, id)
 	if err != nil {
 		writeErr(w, 404, "not_found", err.Error(), false)
 		return
@@ -514,27 +848,42 @@ func (s *Server) apiEventRaw(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(raw)
 }
 
-func (s *Server) apiDevices(w http.ResponseWriter, r *http.Request) {
+func (s *Server) apiEventReprocess(w http.ResponseWriter, r *http.Request) {
 	p, err := s.project(r)
 	if err != nil {
 		writeErr(w, 404, "no_project", err.Error(), false)
 		return
 	}
-	items, err := s.Store.ListDevices(r.Context(), p.ID, 100)
-	if err != nil {
-		writeErr(w, 500, "internal", err.Error(), true)
-		return
-	}
-	writeJSON(w, 200, map[string]any{"items": items})
-}
-
-func (s *Server) apiDevice(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		writeErr(w, 400, "bad_id", "invalid id", false)
 		return
 	}
-	d, err := s.Store.GetDevice(r.Context(), id)
+	if err := s.Store.RequestReprocess(r.Context(), p.ID, id); err != nil {
+		writeErr(w, 404, "not_found", err.Error(), false)
+		return
+	}
+	var actor *uuid.UUID
+	if sess, ok := sessionFrom(r); ok {
+		actor = &sess.UserID
+	}
+	oid, pid := p.OrganizationID, p.ID
+	s.Store.Audit(r.Context(), actor, nil, &oid, &pid, "event.reprocess", "event", id.String(), clientIP(r), r.UserAgent(), nil)
+	writeJSON(w, 202, map[string]string{"status": "queued"})
+}
+
+func (s *Server) apiDevice(w http.ResponseWriter, r *http.Request) {
+	p, err := s.project(r)
+	if err != nil {
+		writeErr(w, 404, "no_project", err.Error(), false)
+		return
+	}
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, 400, "bad_id", "invalid id", false)
+		return
+	}
+	d, err := s.Store.GetDeviceInProject(r.Context(), p.ID, id)
 	if err != nil {
 		writeErr(w, 404, "not_found", err.Error(), false)
 		return
@@ -558,12 +907,17 @@ func (s *Server) apiReleases(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiRelease(w http.ResponseWriter, r *http.Request) {
+	p, err := s.project(r)
+	if err != nil {
+		writeErr(w, 404, "no_project", err.Error(), false)
+		return
+	}
 	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		writeErr(w, 400, "bad_id", "invalid id", false)
 		return
 	}
-	item, err := s.Store.GetRelease(r.Context(), id)
+	item, err := s.Store.GetReleaseInProject(r.Context(), p.ID, id)
 	if err != nil {
 		writeErr(w, 404, "not_found", err.Error(), false)
 		return
@@ -597,13 +951,40 @@ func (s *Server) apiUploadArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	metrics.ArtifactUploads.Add(1)
-	pid := p.ID
-	s.Store.Audit(r.Context(), nil, nil, &p.OrganizationID, &pid, "artifact.upload", "artifact", a.ID.String(), clientIP(r), r.UserAgent(), map[string]any{"build_id": a.BuildID})
+	var actor *uuid.UUID
+	if sess, ok := sessionFrom(r); ok {
+		actor = &sess.UserID
+	}
+	oid, pid := p.OrganizationID, p.ID
+	s.Store.Audit(r.Context(), actor, nil, &oid, &pid, "artifact.upload", "artifact", a.ID.String(), clientIP(r), r.UserAgent(), map[string]any{"build_id": a.BuildID})
 	writeJSON(w, 201, a)
 }
 
+func (s *Server) apiPromoteArtifact(w http.ResponseWriter, r *http.Request) {
+	p, err := s.project(r)
+	if err != nil {
+		writeErr(w, 404, "no_project", err.Error(), false)
+		return
+	}
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, 400, "bad_id", "invalid id", false)
+		return
+	}
+	a, err := s.Store.PromoteArtifact(r.Context(), p.ID, id)
+	if err != nil {
+		writeErr(w, 404, "not_found", err.Error(), false)
+		return
+	}
+	writeJSON(w, 200, a)
+}
+
 func (s *Server) apiAudit(w http.ResponseWriter, r *http.Request) {
-	items, err := s.Store.ListAudit(r.Context(), 100)
+	var orgID uuid.UUID
+	if sess, ok := sessionFrom(r); ok {
+		orgID = sess.OrganizationID
+	}
+	items, err := s.Store.ListAudit(r.Context(), orgID, 100)
 	if err != nil {
 		writeErr(w, 500, "internal", err.Error(), true)
 		return
@@ -633,8 +1014,12 @@ func (s *Server) apiCreateToken(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "internal", err.Error(), true)
 		return
 	}
-	pid := p.ID
-	s.Store.Audit(r.Context(), nil, nil, &p.OrganizationID, &pid, "token.create", "token", t.ID.String(), clientIP(r), r.UserAgent(), map[string]any{"name": body.Name})
+	var actor *uuid.UUID
+	if sess, ok := sessionFrom(r); ok {
+		actor = &sess.UserID
+	}
+	oid, pid := p.OrganizationID, p.ID
+	s.Store.Audit(r.Context(), actor, nil, &oid, &pid, "token.create", "token", t.ID.String(), clientIP(r), r.UserAgent(), map[string]any{"name": body.Name, "scopes": body.Scopes})
 	writeJSON(w, 201, map[string]any{"token": t, "secret": secret})
 }
 
@@ -674,8 +1059,5 @@ func withRequestID(next http.Handler) http.Handler {
 }
 
 func clientIP(r *http.Request) string {
-	if x := r.Header.Get("X-Forwarded-For"); x != "" {
-		return strings.Split(x, ",")[0]
-	}
-	return r.RemoteAddr
+	return clientIPFrom(r)
 }
