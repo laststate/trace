@@ -5,4 +5,9 @@
 *.exe
 *.test
 bootstrap-token.txt
+bootstrap-admin.txt
 web/node_modules/
+web/test-results/
+web/playwright-report/
+web/preview-shots/
+*.log
