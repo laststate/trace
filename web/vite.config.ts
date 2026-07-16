@@ -6,6 +6,7 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    sourcemap: true,
   },
   server: {
     proxy: {
@@ -13,6 +14,11 @@ export default defineConfig({
       '/v1': 'http://localhost:8080',
       '/metrics': 'http://localhost:8080',
       '/health': 'http://localhost:8080',
+      '/openapi.json': 'http://localhost:8080',
     },
+  },
+  preview: {
+    port: 4173,
+    strictPort: true,
   },
 })
