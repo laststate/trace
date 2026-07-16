@@ -4,54 +4,89 @@ package decode
 import (
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"strings"
 
 	"github.com/laststate/trace/internal/lep"
 )
 
 const (
-	TLVIdentity     uint16 = 1
-	TLVEvent        uint16 = 3
-	TLVCPU          uint16 = 4
-	TLVFault        uint16 = 5
-	TLVAssert       uint16 = 10
-	TLVStack        uint16 = 14
-	TLVBuildID      uint16 = 0x0010
-	TLVProjectID    uint16 = 0x0011
-	TLVReleaseID    uint16 = 0x0012
-	TLVFirmwareHash uint16 = 0x0013
+	TLVIdentity     uint16 = lep.TLVIdentity
+	TLVReset        uint16 = lep.TLVReset
+	TLVEvent        uint16 = lep.TLVEvent
+	TLVCPU          uint16 = lep.TLVCPU
+	TLVFault        uint16 = lep.TLVFault
+	TLVBreadcrumb   uint16 = lep.TLVBreadcrumb
+	TLVLog          uint16 = lep.TLVLog
+	TLVAssert       uint16 = lep.TLVAssert
+	TLVStack        uint16 = lep.TLVStack
+	TLVBuildID      uint16 = lep.TLVBuildID
+	TLVProjectID    uint16 = lep.TLVProjectID
+	TLVReleaseID    uint16 = lep.TLVReleaseID
+	TLVFirmwareHash uint16 = lep.TLVFirmwareHash
+	TLVBootID       uint16 = lep.TLVBootID
+	TLVAttachment   uint16 = lep.TLVAttachment
+	TLVExtension    uint16 = lep.TLVExtension
 )
 
 type Identity struct {
-	DeviceID          string `json:"device_id,omitempty"`
-	Product           string `json:"product,omitempty"`
-	HardwareRevision  string `json:"hardware_revision,omitempty"`
-	FirmwareVersion   string `json:"firmware_version,omitempty"`
-	BuildID           string `json:"build_id,omitempty"`
-	ProjectID         string `json:"project_id,omitempty"`
-	ReleaseID         string `json:"release_id,omitempty"`
-	FirmwareHash      string `json:"firmware_hash,omitempty"`
-	GitCommit         string `json:"git_commit,omitempty"`
+	DeviceID         string `json:"device_id,omitempty"`
+	Product          string `json:"product,omitempty"`
+	HardwareRevision string `json:"hardware_revision,omitempty"`
+	FirmwareVersion  string `json:"firmware_version,omitempty"`
+	BuildID          string `json:"build_id,omitempty"`
+	ProjectID        string `json:"project_id,omitempty"`
+	ReleaseID        string `json:"release_id,omitempty"`
+	FirmwareHash     string `json:"firmware_hash,omitempty"`
+	GitCommit        string `json:"git_commit,omitempty"`
+	BootID           string `json:"boot_id,omitempty"`
+}
+
+type Attachment struct {
+	Name string `json:"name,omitempty"`
+	MIME string `json:"mime,omitempty"`
+	Size int    `json:"size"`
+	// Content is base64-safe raw; large blobs truncated in JSON path
+	Content []byte `json:"-"`
 }
 
 type EventMeta struct {
-	Priority      uint8  `json:"priority"`
-	Severity      uint8  `json:"severity"`
-	CaptureLevel  uint8  `json:"capture_level"`
-	Code          uint32 `json:"code"`
-	Fingerprint   uint32 `json:"fingerprint"`
-	RepeatCount   uint32 `json:"repeat_count"`
+	Priority     uint8  `json:"priority"`
+	Severity     uint8  `json:"severity"`
+	CaptureLevel uint8  `json:"capture_level"`
+	Code         uint32 `json:"code"`
+	Fingerprint  uint32 `json:"fingerprint"`
+	RepeatCount  uint32 `json:"repeat_count"`
+}
+
+type Breadcrumb struct {
+	TimestampMS  uint32 `json:"timestamp,omitempty"`
+	MessageID    uint16 `json:"message_id,omitempty"`
+	Severity     uint8  `json:"severity,omitempty"`
+	CategoryHash uint32 `json:"category_hash,omitempty"`
+	MessageHash  uint32 `json:"message_hash,omitempty"`
+	Category     string `json:"category,omitempty"`
+	Message      string `json:"message,omitempty"`
+	Type         string `json:"type,omitempty"`
 }
 
 type Decoded struct {
-	Header   lep.Header `json:"header"`
-	Identity Identity   `json:"identity"`
-	Event    *EventMeta `json:"event,omitempty"`
-	Assert   string     `json:"assert,omitempty"`
-	PC       uint32     `json:"pc,omitempty"`
-	LR       uint32     `json:"lr,omitempty"`
-	SP       uint32     `json:"sp,omitempty"`
-	TLVs     []lep.TLV  `json:"-"`
+	Header      lep.Header   `json:"header"`
+	Identity    Identity     `json:"identity"`
+	Event       *EventMeta   `json:"event,omitempty"`
+	Assert      string       `json:"assert,omitempty"`
+	PC          uint32       `json:"pc,omitempty"`
+	LR          uint32       `json:"lr,omitempty"`
+	SP          uint32       `json:"sp,omitempty"`
+	BootID      string       `json:"boot_id,omitempty"`
+	TimestampMS uint64       `json:"timestamp_ms,omitempty"`
+	Breadcrumbs []Breadcrumb `json:"breadcrumbs,omitempty"`
+	LogLines    []string     `json:"logs,omitempty"`
+	Attachments []Attachment `json:"attachments,omitempty"`
+	Extensions  []lep.TLV    `json:"extensions,omitempty"`
+	Compressed  bool         `json:"compressed,omitempty"`
+	Encrypted   bool         `json:"encrypted,omitempty"`
+	TLVs        []lep.TLV    `json:"-"`
 }
 
 func Envelope(raw []byte) (Decoded, error) {
@@ -59,10 +94,14 @@ func Envelope(raw []byte) (Decoded, error) {
 	if err != nil {
 		return Decoded{}, err
 	}
-	out := Decoded{Header: h}
+	out := Decoded{
+		Header:     h,
+		Compressed: h.Flags&lep.FlagCompressed != 0,
+		Encrypted:  h.Flags&lep.FlagEncrypted != 0,
+	}
 	payload, err := lep.Payload(raw)
 	if err != nil {
-		// still return header for unsupported encrypted envelopes
+		// still return header for unsupported encrypted/compressed envelopes
 		return out, nil
 	}
 	tlvs, err := lep.ParseTLVs(payload)
@@ -81,8 +120,23 @@ func Envelope(raw []byte) (Decoded, error) {
 		case TLVCPU:
 			pc, lr, sp := parseCPU(t.Value, h.Architecture)
 			out.PC, out.LR, out.SP = pc, lr, sp
+		case TLVReset:
+			// RESET is 20 bytes; timestamp_ms at offset 13 (u32) per protocol registry
+			if len(t.Value) >= 17 {
+				out.TimestampMS = uint64(binary.LittleEndian.Uint32(t.Value[13:17]))
+			}
 		case TLVAssert:
 			out.Assert = parseAssertMessage(t.Value)
+		case TLVBreadcrumb:
+			out.Breadcrumbs = append(out.Breadcrumbs, parseBreadcrumb(t.Value))
+		case TLVLog:
+			if msg := strings.TrimSpace(string(t.Value)); msg != "" {
+				out.LogLines = append(out.LogLines, msg)
+				// also as breadcrumb for replay UI
+				out.Breadcrumbs = append(out.Breadcrumbs, Breadcrumb{
+					Type: "log", Message: msg, Category: "log",
+				})
+			}
 		case TLVBuildID:
 			out.Identity.BuildID = asID(t.Value)
 		case TLVProjectID:
@@ -91,9 +145,92 @@ func Envelope(raw []byte) (Decoded, error) {
 			out.Identity.ReleaseID = string(t.Value)
 		case TLVFirmwareHash:
 			out.Identity.FirmwareHash = strings.ToLower(hex.EncodeToString(t.Value))
+		case TLVBootID:
+			out.BootID = asID(t.Value)
+			out.Identity.BootID = out.BootID
+		case TLVAttachment:
+			out.Attachments = append(out.Attachments, parseAttachment(t.Value))
+		case TLVExtension:
+			out.Extensions = append(out.Extensions, t)
 		}
 	}
 	return out, nil
+}
+
+// parseBreadcrumb matches Latch put_breadcrumbs layout:
+// at_ms u32 | message_id u16 | severity u8 | category_hash u32 | message_hash u32
+// optional nested strings field_id 1=category, 2=message
+func parseBreadcrumb(v []byte) Breadcrumb {
+	b := Breadcrumb{Type: "breadcrumb"}
+	if len(v) < 15 {
+		if len(v) > 0 {
+			b.Message = string(v)
+		}
+		return b
+	}
+	b.TimestampMS = binary.LittleEndian.Uint32(v[0:4])
+	b.MessageID = binary.LittleEndian.Uint16(v[4:6])
+	b.Severity = v[6]
+	b.CategoryHash = binary.LittleEndian.Uint32(v[7:11])
+	b.MessageHash = binary.LittleEndian.Uint32(v[11:15])
+	// optional string fields after fixed header (+ value_count u8 + kvs)
+	off := 15
+	if off < len(v) {
+		// value_count may follow strings; scan nested field_id|len|utf8
+		for off+2 <= len(v) {
+			fid := v[off]
+			if fid == 0 || fid > 15 {
+				break
+			}
+			sl := int(v[off+1])
+			off += 2
+			if off+sl > len(v) {
+				break
+			}
+			s := string(v[off : off+sl])
+			off += sl
+			switch fid {
+			case 1:
+				b.Category = s
+			case 2:
+				b.Message = s
+			}
+		}
+	}
+	if b.Message == "" && b.MessageHash != 0 {
+		b.Message = fmt.Sprintf("msg#%d", b.MessageID)
+	}
+	return b
+}
+
+func parseAttachment(v []byte) Attachment {
+	// layout: name_len(u8) name mime_len(u8) mime rest=content
+	a := Attachment{Size: len(v)}
+	if len(v) < 2 {
+		a.Content = v
+		return a
+	}
+	nl := int(v[0])
+	if 1+nl >= len(v) {
+		a.Content = v
+		return a
+	}
+	a.Name = string(v[1 : 1+nl])
+	off := 1 + nl
+	if off >= len(v) {
+		return a
+	}
+	ml := int(v[off])
+	off++
+	if off+ml <= len(v) {
+		a.MIME = string(v[off : off+ml])
+		off += ml
+	}
+	if off < len(v) {
+		a.Content = append([]byte(nil), v[off:]...)
+		a.Size = len(a.Content)
+	}
+	return a
 }
 
 func SeverityName(sev uint8) string {

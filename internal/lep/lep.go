@@ -29,6 +29,34 @@ const (
 	TypeLog        uint8 = 6
 	TypePeripheral uint8 = 7
 	TypeCoredump   uint8 = 8
+
+	// Well-known TLV types (aligned with laststate/protocol + latch envelope.h).
+	TLVIdentity     uint16 = 0x0001
+	TLVReset        uint16 = 0x0002 // NOT timestamp — protocol registry
+	TLVEvent        uint16 = 0x0003
+	TLVCPU          uint16 = 0x0004
+	TLVFault        uint16 = 0x0005
+	TLVBreadcrumb   uint16 = 0x0006
+	TLVMetric       uint16 = 0x0007
+	TLVPower        uint16 = 0x0008
+	TLVHealth       uint16 = 0x0009
+	TLVAssert       uint16 = 0x000A
+	TLVPeripheral   uint16 = 0x000B
+	TLVLog          uint16 = 0x000C
+	TLVMemory       uint16 = 0x000D
+	TLVStack        uint16 = 0x000E
+	TLVHeap         uint16 = 0x000F
+	TLVBuildID      uint16 = 0x0010
+	TLVProjectID    uint16 = 0x0011
+	TLVReleaseID    uint16 = 0x0012
+	TLVFirmwareHash uint16 = 0x0013
+	TLVBootID       uint16 = 0x0014 // Trace extension (not in core 1–15 table)
+	TLVAttachment   uint16 = 0x0020
+	TLVExtension    uint16 = 0x00F0
+	TLVCustomStart  uint16 = 0x8000
+
+	// Deprecated alias — do not use; type 2 is RESET.
+	TLVTimestamp uint16 = TLVReset
 )
 
 type ErrorKind string
@@ -126,16 +154,24 @@ func Payload(data []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if h.Flags&(FlagEncrypted|FlagCompressed) != 0 {
-		return nil, &ValidationError{Kind: ErrorUnsupported, Field: "flags", Reason: "encrypted/compressed payload not decoded in v0.1"}
-	}
 	metadata := 0
 	if h.Flags&FlagAEAD != 0 {
 		metadata = 28
 	}
 	start := HeaderSize + metadata
 	end := start + int(h.PayloadLength)
-	return data[start:end], nil
+	payload := data[start:end]
+	if h.Flags&FlagEncrypted != 0 {
+		return nil, &ValidationError{Kind: ErrorUnsupported, Field: "flags", Reason: "encrypted payload not decoded (need project key)"}
+	}
+	if h.Flags&FlagCompressed != 0 {
+		decoded, err := decompressPayload(payload)
+		if err != nil {
+			return nil, &ValidationError{Kind: ErrorCorrupt, Field: "compression", Reason: err.Error()}
+		}
+		return decoded, nil
+	}
+	return payload, nil
 }
 
 func ParseTLVs(payload []byte) ([]TLV, error) {
