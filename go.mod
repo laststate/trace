@@ -2,6 +2,8 @@ module github.com/laststate/trace
 
 go 1.22
 
+// CI builds with Go 1.24+; module language version stays 1.22 for consumers.
+
 require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.7.4
