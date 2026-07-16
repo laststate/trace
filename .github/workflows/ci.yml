@@ -55,7 +55,9 @@ jobs:
         run: go test ./internal/worker -run 'TestProcess' -count=1 -timeout 120s -v
       - name: Start Trace for live e2e
         env:
-          TRACE_DATABASE_URL: postgres://trace:trace@localhost:5432/trace?sslmode=disable
+          # Dedicated DB so bootstrap writes a fresh ingest token (unit tests
+          # already bootstrapped the default "trace" database).
+          TRACE_DATABASE_URL: postgres://trace:trace@localhost:5432/trace_e2e?sslmode=disable
           TRACE_OBJECT_DIR: ${{ runner.temp }}/trace-e2e/objects
           TRACE_LISTEN: "127.0.0.1:18080"
           TRACE_QUEUE: postgres
@@ -63,6 +65,11 @@ jobs:
           TRACE_OPEN_UI: "false"
         run: |
           set -euo pipefail
+          # Create isolated database via the service container
+          docker run --rm --network host -e PGPASSWORD=trace postgres:16-alpine \
+            psql -h 127.0.0.1 -U trace -d postgres \
+            -c "DROP DATABASE IF EXISTS trace_e2e;" \
+            -c "CREATE DATABASE trace_e2e;"
           mkdir -p "${TRACE_OBJECT_DIR}"
           /tmp/trace > "${{ runner.temp }}/trace-e2e.log" 2>&1 &
           echo $! > "${{ runner.temp }}/trace-e2e.pid"
@@ -84,6 +91,7 @@ jobs:
           if [ ! -f "$token_file" ]; then
             echo "missing bootstrap token at $token_file" >&2
             tail -n 100 "${{ runner.temp }}/trace-e2e.log" || true
+            ls -la "${{ runner.temp }}/trace-e2e/" || true
             exit 1
           fi
           echo "TRACE_E2E_TOKEN=$(tr -d '\n\r' < "$token_file")" >> "$GITHUB_ENV"
