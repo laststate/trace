@@ -2,6 +2,7 @@ package queue
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -38,7 +39,12 @@ func NewFromEnv(pool *pgxpool.Pool, driver, brokerURL string) (Jober, string, er
 		if i := strings.Index(addr, "/"); i >= 0 {
 			addr = addr[:i]
 		}
-		return NewRedis(addr, "trace:jobs"), "redis", nil
+		// Use TRACE_QUEUE_CHANNEL for the Redis channel name, defaulting to "trace:jobs".
+		channel := os.Getenv("TRACE_QUEUE_CHANNEL")
+		if channel == "" {
+			channel = "trace:jobs"
+		}
+		return NewRedis(addr, channel), "redis", nil
 	case "cf", "cloudflare":
 		// TRACE_QUEUE_URL = CF messages API base; optional token after |
 		// e.g. https://api.cloudflare.com/.../messages|token

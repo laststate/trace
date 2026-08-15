@@ -4,19 +4,24 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
+	"sync"
 
 	"github.com/laststate/trace/internal/artifact"
 	"github.com/laststate/trace/internal/auth"
 	"github.com/laststate/trace/internal/batch"
 	"github.com/laststate/trace/internal/config"
 	"github.com/laststate/trace/internal/lep"
+	"github.com/laststate/trace/internal/mailer"
 	"github.com/laststate/trace/internal/metrics"
 	"github.com/laststate/trace/internal/objects"
 	"github.com/laststate/trace/internal/store"
@@ -31,6 +36,48 @@ type Server struct {
 	}
 	Log *slog.Logger
 	UI  http.FileSystem
+	Mailer mailer.Mailer
+
+	// loginLockout tracks failed login attempts per email for brute-force protection.
+	loginLockoutMu sync.Mutex
+	loginLockout   map[string]loginLockoutEntry
+
+	// testResolver, if non-nil, takes precedence over Store for the
+	// activeTenant middleware and sessionFrom. Production code never sets
+	// this; it exists so unit tests can provide a fake sessionResolver
+	// without a live database.
+	testResolver sessionResolver
+}
+
+// loginLockoutEntry records the state of a locked-out account.
+type loginLockoutEntry struct {
+	FirstFailedAt time.Time
+	FailedCount   int
+	LockedUntil   time.Time // zero if not yet locked
+}
+
+// sessionResolver is the subset of *store.Store the api package uses for
+// authentication and tenant lookup. Defined as an interface so unit tests can
+// provide a fake without standing up a real database.
+type sessionResolver interface {
+	AuthSession(ctx context.Context, secret string) (store.Session, error)
+	UserIsMemberOfOrg(ctx context.Context, userID, orgID uuid.UUID) (bool, error)
+}
+
+// resolver returns the sessionResolver-compatible view of s.Store. In
+// production s.Store is already a *store.Store; in tests it is overridden
+// via newServerWithResolver.
+func (s *Server) resolver() sessionResolver {
+	if s.testResolver != nil {
+		return s.testResolver
+	}
+	return s.Store
+}
+
+// newServerWithResolver returns a Server that uses the supplied resolver
+// for authentication/tenant operations. Production code never calls this.
+func newServerWithResolver(r sessionResolver) *Server {
+	return &Server{testResolver: r}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -41,9 +88,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /openapi.json", s.openapi)
 
 	mux.HandleFunc("GET /v1/relay/capabilities", s.capabilities)
-	mux.HandleFunc("POST /v1/ingest", s.ingest)
-	mux.HandleFunc("POST /v1/events", s.ingest)
-	mux.HandleFunc("POST /v1/events:batch", s.ingestBatch)
+	mux.Handle("POST /v1/ingest", s.quotaMiddleware(http.HandlerFunc(s.ingest)))
+	mux.Handle("POST /v1/events", s.quotaMiddleware(http.HandlerFunc(s.ingest)))
+	mux.Handle("POST /v1/events:batch", s.quotaMiddleware(http.HandlerFunc(s.ingestBatch)))
 	mux.HandleFunc("POST /v1/artifacts", s.uploadArtifact)
 	mux.HandleFunc("POST /v1/relay/heartbeat", s.relayHeartbeat)
 
@@ -119,6 +166,42 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/auth/oidc/login", s.oidcLogin)
 	mux.HandleFunc("GET /api/auth/oidc/callback", s.oidcCallback)
 
+	// Phase 3: Self-service auth endpoints.
+	mux.HandleFunc("POST /api/auth/signup", s.apiSignup)
+	mux.HandleFunc("POST /api/auth/verify-email", s.apiVerifyEmail)
+	mux.HandleFunc("POST /api/auth/forgot-password", s.apiForgotPassword)
+	mux.HandleFunc("POST /api/auth/reset-password", s.apiResetPassword)
+	mux.Handle("GET /api/auth/mfa/status", s.requireAuth(http.HandlerFunc(s.apiMfaStatus)))
+	mux.Handle("POST /api/auth/mfa/enroll", s.requireAuth(http.HandlerFunc(s.apiMfaEnroll)))
+	mux.Handle("POST /api/auth/mfa/verify", s.requireAuth(http.HandlerFunc(s.apiMfaVerify)))
+	mux.Handle("POST /api/auth/mfa/disable", s.requireAuth(http.HandlerFunc(s.apiMfaDisable)))
+	mux.HandleFunc("POST /api/auth/mfa/resend-code", s.apiMfaResendCode)
+
+	// Phase 3: Export and onboarding endpoints.
+	mux.Handle("POST /api/webhooks/export", s.requireAuth(http.HandlerFunc(s.apiCreateExport)))
+	mux.Handle("GET /api/webhooks/export/{id}", s.requireAuth(http.HandlerFunc(s.apiGetExport)))
+	mux.Handle("GET /api/webhooks/exports", s.requireAuth(http.HandlerFunc(s.apiListExports)))
+	mux.Handle("GET /api/onboarding/status", s.requireAuth(http.HandlerFunc(s.apiOnboardingStatus)))
+	mux.Handle("POST /api/onboarding/step", s.requireAuth(http.HandlerFunc(s.apiOnboardingStep)))
+	mux.Handle("GET /api/onboarding/progress", s.requireAuth(http.HandlerFunc(s.apiOnboardingProgress)))
+
+	// Self-service org/session/usage endpoints (Phase 2).
+	mux.Handle("GET /api/me/orgs", s.requireAuth(http.HandlerFunc(s.apiMeOrgs)))
+	mux.Handle("POST /api/auth/switch-org", s.requireAuth(http.HandlerFunc(s.apiSwitchOrg)))
+	mux.Handle("GET /api/me/sessions", s.requireAuth(http.HandlerFunc(s.apiMeSessions)))
+	mux.Handle("DELETE /api/me/sessions/{id}", s.requireAuth(http.HandlerFunc(s.apiRevokeMeSession)))
+	mux.Handle("POST /api/me/sessions/revoke-others", s.requireAuth(http.HandlerFunc(s.apiRevokeOtherSessions)))
+	mux.Handle("POST /api/org-tokens", s.requireAuth(http.HandlerFunc(s.apiCreateOrgToken)))
+	mux.Handle("GET /api/me/usage", s.requireAuth(http.HandlerFunc(s.apiMeUsage)))
+
+	// Admin API (HMAC-signed). NOT covered by activeTenant — these endpoints
+	// are called by the proprietary billing service.
+	mux.HandleFunc("POST /v1/admin/organizations/{id}/entitlements", s.adminApplyEntitlements)
+	mux.HandleFunc("GET /v1/admin/organizations/{id}/entitlements", s.adminListEntitlements)
+
+	// Audit-chain integrity verifier (admin-only).
+	mux.HandleFunc("GET /api/admin/audit/verify", s.requireUI(s.apiAuditVerify, "admin"))
+
 	// Orgs / projects / relays / hardware
 	mux.HandleFunc("GET /api/organizations", s.requireUI(s.apiListOrgs, "viewer"))
 	mux.HandleFunc("POST /api/organizations", s.requireUI(s.apiCreateOrg, "viewer"))
@@ -156,11 +239,25 @@ func (s *Server) Handler() http.Handler {
 			fileServer.ServeHTTP(w, r)
 		}))
 	}
-	return withSecurity(withRequestID(mux), s.Cfg.RateLimitPerMin, s.Cfg.MaxConnsPerIP)
+	return withSecurity(withRequestID(s.activeTenant(mux)), s.Cfg.RateLimitPerMin, s.Cfg.MaxConnsPerIP)
 }
 
-func (s *Server) live(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, 200, map[string]string{"status": "ok"})
+func (s *Server) live(w http.ResponseWriter, r *http.Request) {
+	checks := map[string]string{}
+	ok := true
+	if s.Store != nil && s.Store.Pool != nil {
+		if err := s.Store.Pool.Ping(r.Context()); err != nil {
+			checks["postgres"] = err.Error()
+			ok = false
+		} else {
+			checks["postgres"] = "ok"
+		}
+	}
+	if !ok {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "not_live", "checks": checks})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"status": "live", "checks": checks})
 }
 
 func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
@@ -241,6 +338,13 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "invalid_body", "could not read body", false)
 		return
 	}
+	// Reject compressed bodies — the body is size-limited but decompression
+	// could expand it beyond memory. Only identity (uncompressed) is supported.
+	if enc := r.Header.Get("Content-Encoding"); enc != "" && !strings.EqualFold(enc, "identity") {
+		metrics.IngestRejected.Add(1)
+		writeErr(w, 415, "unsupported_encoding", "only identity encoding is supported", false)
+		return
+	}
 	eventID := r.Header.Get("X-Last-State-Event-ID")
 	if eventID == "" {
 		eventID = r.Header.Get("Idempotency-Key")
@@ -273,6 +377,13 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	metrics.IngestAccepted.Add(1)
+	if s.Log != nil {
+		s.Log.Debug("ingest accepted",
+			"event_id", res.Event.ID.String(),
+			"project_id", tok.ProjectID.String(),
+			"pipeline", res.Event.Pipeline,
+		)
+	}
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"id": res.Event.ID.String(), "status": "accepted", "duplicate": false,
 	})
@@ -534,6 +645,9 @@ func (s *Server) saveArtifact(r *http.Request, projectID uuid.UUID) (store.Artif
 
 var errForbidden = errors.New("forbidden")
 
+// nowFunc returns the current UTC time. Tests may swap this for a fixed clock.
+var nowFunc = func() time.Time { return time.Now().UTC() }
+
 func (s *Server) requireIngest(r *http.Request, scope string) (store.Token, error) {
 	secret, err := auth.Bearer(r.Header.Get("Authorization"))
 	if err != nil {
@@ -556,39 +670,49 @@ const (
 	projectKey ctxKey = 2
 )
 
+// openUIEndpoints lists the API paths that remain accessible without
+// authentication when OpenUI is enabled. Only read-only overview/search
+// endpoints are whitelisted — sensitive data (issues, events, audit logs,
+// settings, tokens) requires authentication regardless of OpenUI.
+var openUIEndpoints = map[string]bool{
+	"/api/overview":        true,
+	"/api/search":          true,
+	"/api/query/events":    true,
+	"/api/releases":        true,
+	"/api/events":          true,
+	"/api/artifacts":       true,
+	"/api/labels":          true,
+	"/api/boots":           true,
+}
+
 func (s *Server) requireUI(next http.HandlerFunc, minRole string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// OpenUI is explicit opt-in for local/dev only
-		if s.Cfg.OpenUI && r.Method == http.MethodGet {
+		// OpenUI is explicit opt-in for local/dev only.
+		// Only whitelisted endpoints are accessible without authentication.
+		if s.Cfg.OpenUI && r.Method == http.MethodGet && openUIEndpoints[r.URL.Path] {
 			next(w, r)
 			return
 		}
-		secret, err := sessionSecretFrom(r)
-		if err != nil {
+
+		// Use the canonical sessionFrom defined in session.go (DB-backed).
+		sess, ok := sessionFrom(s, r)
+		if !ok {
 			writeErr(w, 401, "unauthorized", "login required", false)
 			return
 		}
-		sess, err := s.Store.AuthSession(r.Context(), secret)
-		if err != nil {
-			writeErr(w, 401, "unauthorized", "invalid session", false)
-			return
-		}
-		if !sess.Can(minRole) {
+
+		if !s.userHasRole(sess, minRole) {
 			writeErr(w, 403, "forbidden", "insufficient role", false)
 			return
 		}
+
 		next(w, r.WithContext(context.WithValue(r.Context(), sessKey, sess)))
 	}
 }
 
-func sessionFrom(r *http.Request) (store.Session, bool) {
-	v, ok := r.Context().Value(sessKey).(store.Session)
-	return v, ok
-}
-
 func (s *Server) project(r *http.Request) (store.Project, error) {
 	// Prefer X-Project-ID when session present (multi-tenant)
-	if sess, ok := sessionFrom(r); ok {
+	if sess, ok := sessionFrom(s, r); ok {
 		var pid *uuid.UUID
 		if h := r.Header.Get("X-Project-ID"); h != "" {
 			if id, err := uuid.Parse(h); err == nil {
@@ -627,7 +751,53 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "invalid_json", err.Error(), false)
 		return
 	}
+	// Account lockout: prevent brute-force attacks on specific accounts.
+	// After MaxFailedLoginAttempts failed attempts within LockoutWindow,
+	// the account is locked for LockoutWindow duration.
+	const maxFailedLogins = 5
+	const lockoutWindow = 5 * time.Minute
+	s.loginLockoutMu.Lock()
+	if entry, ok := s.loginLockout[body.Email]; ok && time.Since(entry.LockedUntil) >= 0 {
+		// Lockout expired, clear it
+		delete(s.loginLockout, body.Email)
+	} else if entry, ok := s.loginLockout[body.Email]; ok && entry.LockedUntil.After(time.Now()) {
+		retryAfter := int(time.Until(entry.LockedUntil).Seconds())
+		if retryAfter < 1 {
+			retryAfter = 1
+		}
+		s.loginLockoutMu.Unlock()
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		writeErr(w, http.StatusTooManyRequests, "account_locked",
+			fmt.Sprintf("too many failed login attempts. Retry after %ds", retryAfter), false)
+		return
+	}
+	s.loginLockoutMu.Unlock()
+
 	sess, secret, err := s.Store.Login(r.Context(), body.Email, body.Password)
+	if err != nil {
+		// Record failed attempt
+		s.loginLockoutMu.Lock()
+		entry := loginLockoutEntry{
+			FirstFailedAt: time.Now(),
+			FailedCount:   1,
+		}
+		if existing, ok := s.loginLockout[body.Email]; ok {
+			entry.FailedCount = existing.FailedCount + 1
+			entry.FirstFailedAt = existing.FirstFailedAt
+		}
+		if entry.FailedCount >= maxFailedLogins {
+			entry.LockedUntil = time.Now().Add(lockoutWindow)
+		}
+		s.loginLockout[body.Email] = entry
+		s.loginLockoutMu.Unlock()
+
+		writeErr(w, 401, "invalid_credentials", "invalid email or password", false)
+		return
+	}
+	// Successful login: clear lockout
+	s.loginLockoutMu.Lock()
+	delete(s.loginLockout, body.Email)
+	s.loginLockoutMu.Unlock()
 	if err != nil {
 		writeErr(w, 401, "invalid_credentials", "invalid email or password", false)
 		return
@@ -694,12 +864,23 @@ func (s *Server) apiOverview(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "no_project", err.Error(), false)
 		return
 	}
+	// Pagination: limit trend data points to avoid large responses.
+	days := 14
+	if d := r.URL.Query().Get("days"); d != "" {
+		if n, err := strconv.Atoi(d); err == nil && n > 0 && n <= 90 {
+			days = n
+		}
+	}
 	ov, err := s.Store.Overview(r.Context(), p.ID)
 	if err != nil {
 		writeErr(w, 500, "internal", err.Error(), true)
 		return
 	}
 	ov["project"] = p
+	// Cap trend data to requested days
+	if trend, ok := ov["trend"].([]map[string]any); ok && len(trend) > days {
+		ov["trend"] = trend[len(trend)-days:]
+	}
 	writeJSON(w, 200, ov)
 }
 
@@ -709,6 +890,13 @@ func (s *Server) apiIssue(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "no_project", err.Error(), false)
 		return
 	}
+	
+	// Ensure organization matches current session before proceeding
+	if err := s.checkOrgMatch(r, p.OrganizationID); err != nil {
+		writeErr(w, 403, "access_denied", "organization mismatch", false)
+		return
+	}
+
 	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		writeErr(w, 400, "bad_id", "invalid id", false)
@@ -755,7 +943,7 @@ func (s *Server) apiIssueStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var actor *uuid.UUID
-	if sess, ok := sessionFrom(r); ok {
+	if sess, ok := sessionFrom(s, r); ok {
 		actor = &sess.UserID
 	}
 	oid := p.OrganizationID
@@ -794,7 +982,7 @@ func (s *Server) apiIssueComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var author *uuid.UUID
-	if sess, ok := sessionFrom(r); ok {
+	if sess, ok := sessionFrom(s, r); ok {
 		author = &sess.UserID
 	}
 	cid, err := s.Store.AddIssueComment(r.Context(), p.ID, id, author, body.Body)
@@ -867,7 +1055,7 @@ func (s *Server) apiEventReprocess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var actor *uuid.UUID
-	if sess, ok := sessionFrom(r); ok {
+	if sess, ok := sessionFrom(s, r); ok {
 		actor = &sess.UserID
 	}
 	oid, pid := p.OrganizationID, p.ID
@@ -955,7 +1143,7 @@ func (s *Server) apiUploadArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	metrics.ArtifactUploads.Add(1)
 	var actor *uuid.UUID
-	if sess, ok := sessionFrom(r); ok {
+	if sess, ok := sessionFrom(s, r); ok {
 		actor = &sess.UserID
 	}
 	oid, pid := p.OrganizationID, p.ID
@@ -984,9 +1172,30 @@ func (s *Server) apiPromoteArtifact(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) apiAudit(w http.ResponseWriter, r *http.Request) {
 	var orgID uuid.UUID
-	if sess, ok := sessionFrom(r); ok {
+	if sess, ok := sessionFrom(s, r); ok {
 		orgID = sess.OrganizationID
 	}
+
+	// Ensure organization matches current session before proceeding
+	if err := s.checkOrgMatch(r, orgID); err != nil {
+		writeErr(w, 403, "access_denied", "organization mismatch", false)
+		return
+	}
+
+	// Check for export flag
+	if r.URL.Query().Get("export") == "true" {
+		data, err := s.Store.ExportAuditLogsToNDJSON(r.Context(), orgID, 10000)
+		if err != nil {
+			writeErr(w, 500, "export", err.Error(), true)
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set("Content-Disposition", "attachment; filename=\"audit-export.ndjson\"")
+		w.WriteHeader(200)
+		w.Write(data)
+		return
+	}
+
 	items, err := s.Store.ListAudit(r.Context(), orgID, 100)
 	if err != nil {
 		writeErr(w, 500, "internal", err.Error(), true)
@@ -1001,6 +1210,13 @@ func (s *Server) apiCreateToken(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "no_project", err.Error(), false)
 		return
 	}
+	
+	// Ensure organization matches current session before proceeding
+	if err := s.checkOrgMatch(r, p.OrganizationID); err != nil {
+		writeErr(w, 403, "access_denied", "organization mismatch", false)
+		return
+	}
+
 	var body struct {
 		Name   string   `json:"name"`
 		Scopes []string `json:"scopes"`
@@ -1018,7 +1234,7 @@ func (s *Server) apiCreateToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var actor *uuid.UUID
-	if sess, ok := sessionFrom(r); ok {
+	if sess, ok := sessionFrom(s, r); ok {
 		actor = &sess.UserID
 	}
 	oid, pid := p.OrganizationID, p.ID
@@ -1057,10 +1273,12 @@ func withRequestID(next http.Handler) http.Handler {
 			id = auth.RandomHex(8)
 		}
 		w.Header().Set("X-Request-ID", id)
-		next.ServeHTTP(w, r)
+		// Preserve the request's context (including cancellation) — do NOT
+		// replace with context.Background() which would discard deadlines.
+		next.ServeHTTP(w, r.WithContext(r.Context()))
 	})
 }
 
 func clientIP(r *http.Request) string {
-	return clientIPFrom(r)
+	return clientIPFrom(r, "leftmost")
 }

@@ -67,20 +67,21 @@ func (q *MemoryQueue) Claim(ctx context.Context, leaseFor time.Duration) (Job, e
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	now := time.Now()
+	// First pass: reset expired leases to retry
+	for _, j := range q.jobs {
+		if j.status == "leased" && j.until.Before(now) {
+			j.status = "retry"
+			j.available = now
+		}
+	}
+	// Second pass: claim available jobs
 	for _, j := range q.jobs {
 		if (j.status == "ready" || j.status == "retry") && !j.available.After(now) {
-			if j.status == "leased" && j.until.After(now) {
-				continue
-			}
 			j.status = "leased"
 			j.Attempt++
 			j.Lease = auth.RandomHex(8)
 			j.until = now.Add(leaseFor)
 			return j.Job, nil
-		}
-		if j.status == "leased" && j.until.Before(now) {
-			j.status = "retry"
-			j.available = now
 		}
 	}
 	return Job{}, pgx.ErrNoRows

@@ -23,7 +23,12 @@ func DefaultMaxDepth() int64 { return atomic.LoadInt64(&defaultMaxDepth) }
 var ErrBackpressure = fmt.Errorf("queue backpressure: depth limit reached")
 
 // GuardEnqueue checks depth before insert when q implements DepthQuerier.
+// Returns context error if ctx is cancelled.
 func GuardEnqueue(ctx context.Context, q Jober) error {
+	// Check context cancellation first
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	max := DefaultMaxDepth()
 	if max <= 0 {
 		return nil

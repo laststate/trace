@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os"
 	"strconv"
@@ -26,6 +27,9 @@ type Config struct {
 	OpenUI bool
 	// Mode: "all" (API+workers), "api", "worker"
 	Mode string
+	// modeWasCorrected is true if Mode was silently corrected from an invalid value.
+	// Used by ValidateProduction to warn about potential misconfiguration.
+	modeWasCorrected bool
 
 	// HTTP hardening
 	ReadTimeout     time.Duration
@@ -51,6 +55,14 @@ type Config struct {
 	S3AccessKey string
 	S3SecretKey string
 
+	// Mailer (SMTP)
+	SMTPHost   string
+	SMTPPort   int
+	SMTPUser   string
+	SMTPPass   string
+	SMTPFrom   string
+	SMTPSecure string // "tls" or "ssl" or ""
+
 	// OIDC
 	OIDCIssuer       string
 	OIDCClientID     string
@@ -64,6 +76,7 @@ type Config struct {
 	TrustedProxies      string // TRACE_TRUSTED_PROXIES comma-separated CIDRs/IPs
 	SecretsKey          string // TRACE_SECRETS_KEY 32-byte base64/hex for AES-GCM secret at rest
 	CookieSecure        bool   // TRACE_COOKIE_SECURE (default true when PublicURL is https)
+	ShutdownTimeoutSec  int    // TRACE_SHUTDOWN_TIMEOUT_SEC (default 10)
 	AppVersion          string
 }
 
@@ -71,7 +84,7 @@ func Load() Config {
 	c := Config{
 		Listen:          env("TRACE_LISTEN", ":8080"),
 		PublicURL:       env("TRACE_PUBLIC_URL", "http://localhost:8080"),
-		DatabaseURL:     env("TRACE_DATABASE_URL", "postgres://trace:trace@localhost:5432/trace?sslmode=disable"),
+		DatabaseURL:     env("TRACE_DATABASE_URL", "postgres://trace:trace@localhost:5432/trace"),
 		ObjectDir:       env("TRACE_OBJECT_DIR", "./data/objects"),
 		MaxEventSize:    envInt64("TRACE_MAX_EVENT_SIZE", 4<<20),
 		MaxArtifactSize: envInt64("TRACE_MAX_ARTIFACT_SIZE", 64<<20),
@@ -109,18 +122,32 @@ func Load() Config {
 		OIDCClientSecret: env("TRACE_OIDC_CLIENT_SECRET", ""),
 		OIDCRedirectURL:  env("TRACE_OIDC_REDIRECT_URL", ""),
 
+		// Mailer (SMTP)
+		SMTPHost:   env("TRACE_SMTP_HOST", ""),
+		SMTPPort:   int(envInt64("TRACE_SMTP_PORT", 587)),
+		SMTPUser:   env("TRACE_SMTP_USER", ""),
+		SMTPPass:   env("TRACE_SMTP_PASS", ""),
+		SMTPFrom:   env("TRACE_SMTP_FROM", ""),
+		SMTPSecure: env("TRACE_SMTP_SECURE", ""),
+
 		AllowPublicRegister: env("TRACE_ALLOW_PUBLIC_REGISTER", "false") == "true",
 		OIDCAutoJoin:        env("TRACE_OIDC_AUTO_JOIN", "false") == "true",
 		SAMLInsecure:        env("TRACE_SAML_INSECURE", "false") == "true",
 		TrustedProxies:      env("TRACE_TRUSTED_PROXIES", ""),
 		SecretsKey:          env("TRACE_SECRETS_KEY", ""),
+		ShutdownTimeoutSec:  int(envInt64("TRACE_SHUTDOWN_TIMEOUT_SEC", 10)),
 		AppVersion:          env("TRACE_VERSION", "0.8.0"),
 	}
 	if c.OIDCRedirectURL == "" && c.OIDCIssuer != "" {
 		c.OIDCRedirectURL = strings.TrimRight(c.PublicURL, "/") + "/api/auth/oidc/callback"
 	}
 	if c.Mode != "all" && c.Mode != "api" && c.Mode != "worker" {
+		c.modeWasCorrected = true
 		c.Mode = "all"
+	}
+	// Default SMTPSecure to 'tls' only when SMTPHost is configured
+	if c.SMTPHost != "" && c.SMTPSecure == "" {
+		c.SMTPSecure = "tls"
 	}
 	if env("TRACE_COOKIE_SECURE", "") != "" {
 		c.CookieSecure = env("TRACE_COOKIE_SECURE", "false") == "true"
@@ -131,26 +158,111 @@ func Load() Config {
 }
 
 // ValidateProduction rejects insecure production settings.
-func (c Config) ValidateProduction() error {
+// It returns a slice of warnings (non-fatal) and errors (fatal).
+type ValidationWarning struct {
+	Field string
+	Msg   string
+}
+
+func (c Config) ValidateProduction() ([]ValidationWarning, error) {
+	var warnings []ValidationWarning
+
 	if env("TRACE_ENV", "") != "production" && env("TRACE_ENV", "") != "prod" {
-		return nil
+		return warnings, nil
 	}
+
 	if c.OpenUI {
-		return fmt.Errorf("TRACE_OPEN_UI must be false in production")
+		return warnings, fmt.Errorf("TRACE_OPEN_UI must be false in production")
 	}
 	if c.AdminPassword == "admin" || c.AdminPassword == "password" {
-		return fmt.Errorf("insecure TRACE_ADMIN_PASSWORD in production")
+		return warnings, fmt.Errorf("insecure TRACE_ADMIN_PASSWORD in production")
 	}
 	if c.AllowPublicRegister {
-		return fmt.Errorf("TRACE_ALLOW_PUBLIC_REGISTER must be false in production")
+		return warnings, fmt.Errorf("TRACE_ALLOW_PUBLIC_REGISTER must be false in production")
 	}
 	if c.SAMLInsecure {
-		return fmt.Errorf("TRACE_SAML_INSECURE must be false in production")
+		return warnings, fmt.Errorf("TRACE_SAML_INSECURE must be false in production")
 	}
 	if c.OIDCAutoJoin {
-		return fmt.Errorf("TRACE_OIDC_AUTO_JOIN must be false in production")
+		return warnings, fmt.Errorf("TRACE_OIDC_AUTO_JOIN must be false in production")
 	}
-	return nil
+
+	// Validate sslmode in DatabaseURL
+	if c.DatabaseURL != "" {
+		if strings.Contains(c.DatabaseURL, "sslmode=disable") {
+			warnings = append(warnings, ValidationWarning{
+				Field: "DatabaseURL",
+				Msg:   "sslmode=disable detected in DatabaseURL — TLS encryption is not enabled",
+			})
+		}
+	}
+
+	// Validate SecretsKey length (must be 32 bytes for AES-GCM)
+	if c.SecretsKey != "" {
+		keyBytes, err := decodeSecretsKey(c.SecretsKey)
+		if err != nil {
+			return warnings, fmt.Errorf("invalid TRACE_SECRETS_KEY: %w", err)
+		}
+		if len(keyBytes) != 32 {
+			return warnings, fmt.Errorf("TRACE_SECRETS_KEY must be 32 bytes (got %d)", len(keyBytes))
+		}
+	}
+
+	if c.modeWasCorrected {
+		warnings = append(warnings, ValidationWarning{
+			Field: "Mode",
+			Msg:   "TRACE_MODE was silently corrected to 'all' — check your configuration",
+		})
+	}
+
+	return warnings, nil
+}
+
+// decodeSecretsKey decodes a hex or base64-encoded secrets key to bytes.
+func decodeSecretsKey(key string) ([]byte, error) {
+	// Try hex first
+	if len(key)%2 == 0 {
+		if b, err := decodeHex(key); err == nil {
+			return b, nil
+		}
+	}
+	// Try base64
+	if b, err := decodeBase64(key); err == nil {
+		return b, nil
+	}
+	return nil, fmt.Errorf("key is not valid hex or base64")
+}
+
+func decodeHex(s string) ([]byte, error) {
+	b := make([]byte, len(s)/2)
+	for i := 0; i < len(s); i += 2 {
+		var v byte
+		for j := i; j < i+2; j++ {
+			c := s[j]
+			v <<= 4
+			switch {
+			case c >= '0' && c <= '9':
+				v |= c - '0'
+			case c >= 'a' && c <= 'f':
+				v |= c - 'a' + 10
+			case c >= 'A' && c <= 'F':
+				v |= c - 'A' + 10
+			default:
+				return nil, fmt.Errorf("invalid hex char")
+			}
+		}
+		b[i/2] = v
+	}
+	return b, nil
+}
+
+func decodeBase64(s string) ([]byte, error) {
+	b := make([]byte, base64.StdEncoding.DecodedLen(len(s)))
+	n, err := base64.StdEncoding.Decode(b, []byte(s))
+	if err != nil {
+		return nil, err
+	}
+	return b[:n], nil
 }
 
 func env(k, def string) string {

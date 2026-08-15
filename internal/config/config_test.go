@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/laststate/trace/internal/config"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestLoadDefaultsSecure(t *testing.T) {
@@ -44,20 +45,36 @@ func TestLoadOpenUITrue(t *testing.T) {
 
 func TestValidateProduction(t *testing.T) {
 	t.Setenv("TRACE_ENV", "production")
+	// Set invalid mode to trigger mode correction warning
+	t.Setenv("TRACE_MODE", "a1l")
 	c := config.Load()
+	assert.Equal(t, "all", c.Mode, "invalid mode should be corrected")
 	c.OpenUI = true
-	if err := c.ValidateProduction(); err == nil {
+	warnings, err := c.ValidateProduction()
+	if err == nil {
 		t.Fatal("open ui in prod")
 	}
+	assert.Empty(t, warnings) // warnings should not be set for fatal errors
 	c.OpenUI = false
 	c.AdminPassword = "admin"
-	if err := c.ValidateProduction(); err == nil {
+	_, err = c.ValidateProduction()
+	if err == nil {
 		t.Fatal("weak password")
 	}
 	c.AdminPassword = "strong-enough-password"
-	if err := c.ValidateProduction(); err != nil {
+	warnings, err = c.ValidateProduction()
+	if err != nil {
 		t.Fatal(err)
 	}
+	// Should have warning for mode correction
+	assert.NotEmpty(t, warnings)
+	hasModeWarning := false
+	for _, w := range warnings {
+		if w.Field == "Mode" {
+			hasModeWarning = true
+		}
+	}
+	assert.True(t, hasModeWarning, "expected Mode warning")
 }
 
 func TestModeNormalization(t *testing.T) {

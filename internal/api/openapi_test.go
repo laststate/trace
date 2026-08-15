@@ -24,7 +24,7 @@ func TestOpenAPIJSONValid(t *testing.T) {
 			t.Fatalf("missing path %s", p)
 		}
 	}
-	if !strings.Contains(openapiJSON, "0.8.0") {
+	if !strings.Contains(openapiJSON, "1.0.0") {
 		t.Fatal("version")
 	}
 }

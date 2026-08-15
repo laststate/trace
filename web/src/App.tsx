@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, Navigate, Route, Routes, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { api, setToken, token } from './api'
 import {
@@ -7,9 +7,89 @@ import {
   seriesToCSV, downloadText,
   type StackedBar,
 } from './charts'
-import { ChevronRight, LogIn, LogOut, NavIcon, Search } from './icons'
+import {
+  Activity, AlertTriangle, Archive, BarChart3, Bell, BellOff, Check, ChevronRight,
+  ExternalLink, Gauge, LogIn, LogOut, NavIcon, RefreshCw, Search, Settings, Shield,
+  Volume2, VolumeX, X,
+} from './icons'
 import { BootSplash, BrandLogo, Loading } from './Loading'
 import { NAV, type View, isView } from './nav'
+import {
+  isNotificationSupported,
+  getNotificationPermission,
+  requestNotificationPermission,
+  isNotificationsEnabled,
+  setNotificationsEnabled,
+  isSoundEnabled,
+  setSoundEnabled,
+  isPromptDismissed,
+  setPromptDismissed,
+  getAlertHistory,
+  clearAlertHistory,
+  markAllAlertsRead,
+  sendBrowserNotification,
+  sendTestNotification,
+  subscribeToNotifications,
+  type SystemAlert,
+  type NotificationPermissionState,
+} from './notifications'
+import { Button } from './components/ui/button'
+import { Badge } from './components/ui/badge'
+
+type ToastType = 'success' | 'error' | 'info'
+interface Toast {
+  id: string
+  type: ToastType
+  message: string
+}
+
+function generateId(): string {
+  return Math.random().toString(36).slice(2, 10) + Date.now().toString(36)
+}
+
+// Keyboard shortcuts manager
+function useKeyboardShortcuts(dispatch: (t: Toast) => void) {
+  useEffect(() => {
+    function handleKey(e: KeyboardEvent) {
+      // Don't trigger when typing in inputs
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return
+
+      // Ctrl/Cmd + K → Focus search
+      if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+        e.preventDefault()
+        document.querySelector('[data-testid="global-search"]')?.dispatchEvent(new Event('focus', { bubbles: true }))
+      }
+
+      // ? → Toggle shortcut help
+      if (e.key === '?' && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault()
+        dispatch({ id: generateId(), type: 'info', message: 'Shortcuts: Ctrl+K search, / issues, e events, d devices, r releases, a alerts' })
+      }
+
+      // / → Go to issues
+      if (e.key === '/' && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault()
+        window.location.hash = '#/issues'
+      }
+    }
+    window.addEventListener('keydown', handleKey)
+    return () => window.removeEventListener('keydown', handleKey)
+  }, [dispatch])
+}
+
+// Toast manager hook
+function useToast() {
+  const [toasts, setToasts] = useState<Toast[]>([])
+
+  const dispatch = useCallback((toast: Toast) => {
+    setToasts(prev => [...prev.slice(-4), toast]) // max 5 toasts
+    setTimeout(() => {
+      setToasts(prev => prev.filter(t => t.id !== toast.id))
+    }, 4000)
+  }, [])
+
+  return { toasts, dispatch }
+}
 
 export default function App() {
   return (
@@ -45,10 +125,101 @@ function Shell() {
   const [loginOpen, setLoginOpen] = useState(false)
   const [loginEmail, setLoginEmail] = useState('admin@localhost')
   const [loginPass, setLoginPass] = useState('')
-  /** True until first successful payload (or hard error) — full-screen brand splash. */
   const [booting, setBooting] = useState(true)
   const [liveAt, setLiveAt] = useState<number>(0)
+  const [pollInterval, setPollInterval] = useState(5000)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const limit = 25
+
+  // Browser Notification and Alert States
+  const [notifPermission, setNotifPermission] = useState<NotificationPermissionState>(getNotificationPermission())
+  const [notifEnabled, setNotifEnabled] = useState(isNotificationsEnabled())
+  const [soundEnabled, setSoundEnabledState] = useState(isSoundEnabled())
+  const [promptDismissed, setPromptDismissedState] = useState(isPromptDismissed())
+  const [alerts, setAlerts] = useState<SystemAlert[]>(getAlertHistory())
+  const [notifOpen, setNotifOpen] = useState(false)
+  const notifRef = useRef<HTMLDivElement>(null)
+  const prevOverviewRef = useRef<any>(null)
+
+  const { toasts, dispatch: dispatchToast } = useToast()
+
+  useKeyboardShortcuts(dispatchToast)
+
+  // Subscribe to notification storage updates across tabs / components
+  useEffect(() => {
+    return subscribeToNotifications(() => {
+      setNotifPermission(getNotificationPermission())
+      setNotifEnabled(isNotificationsEnabled())
+      setSoundEnabledState(isSoundEnabled())
+      setPromptDismissedState(isPromptDismissed())
+      setAlerts(getAlertHistory())
+    })
+  }, [])
+
+  // Close notification dropdown when clicking outside
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (notifRef.current && !notifRef.current.contains(e.target as Node)) {
+        setNotifOpen(false)
+      }
+    }
+    if (notifOpen) {
+      document.addEventListener('mousedown', handleClickOutside)
+      return () => document.removeEventListener('mousedown', handleClickOutside)
+    }
+  }, [notifOpen])
+
+  // Live Incident Monitor: checks data differences and triggers browser notifications
+  const checkLiveIncidents = useCallback((newData: any, currentView: View) => {
+    if (!newData) return
+    const prev = prevOverviewRef.current
+    if (!prev) {
+      prevOverviewRef.current = newData
+      return
+    }
+
+    if (currentView === 'overview') {
+      const prevFatal = Number(prev.fatal_open) || 0
+      const newFatal = Number(newData.fatal_open) || 0
+      if (newFatal > prevFatal) {
+        const diff = newFatal - prevFatal
+        sendBrowserNotification({
+          title: 'New Fatal Error in Trace',
+          body: `${diff} new critical severity Fatal incident(s) detected in the system.`,
+          severity: 'fatal',
+          url: '/issues?severity=fatal',
+          tag: 'fatal-alert-' + Date.now(),
+        })
+        dispatchToast({ id: generateId(), type: 'error', message: 'Fatal Alert: New critical incident detected!' })
+      } else {
+        const prevIssues = Number(prev.open_issues) || 0
+        const newIssues = Number(newData.open_issues) || 0
+        if (newIssues > prevIssues) {
+          sendBrowserNotification({
+            title: 'New Incident Registered',
+            body: `Identified new open problems (${newIssues} total).`,
+            severity: 'warning',
+            url: '/issues',
+            tag: 'issue-alert-' + Date.now(),
+          })
+        }
+      }
+    } else if (currentView === 'dead' && newData.items) {
+      const prevDead = Array.isArray(prev.items) ? prev.items.length : 0
+      const newDead = newData.items.length
+      if (newDead > prevDead) {
+        sendBrowserNotification({
+          title: 'Dead Job in Queue',
+          body: 'A background job has reached the maximum retry limit and failed.',
+          severity: 'error',
+          url: '/dead',
+          tag: 'dead-job-' + Date.now(),
+        })
+      }
+    }
+
+    prevOverviewRef.current = newData
+  }, [dispatchToast])
 
   const go = useCallback((v: View, itemId?: string) => {
     navigate(itemId ? `/${v}/${itemId}` : `/${v}`)
@@ -88,13 +259,20 @@ function Shell() {
           if (!cancelled) { setDetail(d); setData(null); setLiveAt(Date.now()) }
         } else {
           const d = await load(view, page, filter, limit)
-          if (!cancelled) { setData(d); setDetail(null); setLiveAt(Date.now()) }
+          if (!cancelled) {
+            setData(d)
+            setDetail(null)
+            setLiveAt(Date.now())
+            if (view === 'overview') prevOverviewRef.current = d
+          }
         }
       } catch (e: any) {
-        if (!cancelled) setErr(String(e.message || e))
+        if (!cancelled) {
+          setErr(String(e.message || e))
+          dispatchToast({ id: generateId(), type: 'error', message: e.message || 'Request failed' })
+        }
       } finally {
         if (!cancelled) {
-          // Keep splash visible at least ~700ms so GIF doesn't flash
           const wait = Math.max(0, 700 - (Date.now() - started))
           if (wait > 0) await new Promise(r => setTimeout(r, wait))
           if (!cancelled) {
@@ -110,7 +288,7 @@ function Shell() {
   // Live polling — refresh overview (and current list) without full-screen splash
   useEffect(() => {
     if (booting || search || loginOpen) return
-    const intervalMs = view === 'overview' ? 5000 : 15000
+    const intervalMs = view === 'overview' ? pollInterval : 15000
     const t = window.setInterval(async () => {
       try {
         if (detailId) {
@@ -118,6 +296,7 @@ function Shell() {
           setDetail(d)
         } else {
           const d = await load(view, page, filter, limit)
+          checkLiveIncidents(d, view)
           setData(d)
         }
         setLiveAt(Date.now())
@@ -127,7 +306,7 @@ function Shell() {
       }
     }, intervalMs)
     return () => window.clearInterval(t)
-  }, [booting, view, detailId, page, filter.status, filter.severity, filter.q, search, loginOpen])
+  }, [booting, view, detailId, page, filter.status, filter.severity, filter.q, search, loginOpen, pollInterval, checkLiveIncidents])
 
   async function doLogin() {
     try {
@@ -136,16 +315,23 @@ function Shell() {
       setLoginOpen(false)
       setLoginPass('')
       await refreshAuth()
-      // reload current view with session
       setPage(p => p)
       navigate(0)
-    } catch (e: any) { alert(e.message) }
+      dispatchToast({ id: generateId(), type: 'success', message: 'Signed in successfully' })
+    } catch (e: any) {
+      dispatchToast({ id: generateId(), type: 'error', message: e.message || 'Login failed' })
+    }
   }
 
   async function doSearch() {
     if (!q.trim()) return
-    try { setSearch(await api('/api/search?q=' + encodeURIComponent(q.trim()))) }
-    catch (e: any) { setErr(e.message) }
+    try {
+      const results = await api('/api/search?q=' + encodeURIComponent(q.trim()))
+      setSearch(results)
+      dispatchToast({ id: generateId(), type: 'info', message: `Found ${Object.values(results).flat().length} results` })
+    } catch (e: any) {
+      dispatchToast({ id: generateId(), type: 'error', message: e.message || 'Search failed' })
+    }
   }
 
   const total = data?.total ?? 0
@@ -153,12 +339,26 @@ function Shell() {
   const showBoot = booting || (loading && !data && !detail && !err)
 
   if (showBoot) {
-    return <BootSplash label="Loading dashboard…" />
+    return <BootSplash label="Loading dashboard..." />
   }
 
   return (
     <div className="app">
       <a className="skip-link" href="#main">Skip to content</a>
+
+      {/* Toast notifications */}
+      <div className="toast-container" aria-live="polite">
+        {toasts.map(t => (
+          <div key={t.id} className={`toast ${t.type}`}>
+            {t.type === 'success' && <Check size={14} className="text-green-400" />}
+            {t.type === 'error' && <X size={14} className="text-red-400" />}
+            {t.type === 'info' && <Activity size={14} className="text-blue-400" />}
+            {t.message}
+          </div>
+        ))}
+      </div>
+
+      {/* Sidebar */}
       <aside className="sidebar" aria-label="Main">
         <div className="brand">
           <BrandLogo size={28} />
@@ -176,76 +376,285 @@ function Shell() {
               >
                 <NavIcon view={item.id} />
                 <span>{item.label}</span>
+                {view === item.id && !detailId && (
+                  <span style={{ marginLeft: 'auto', width: 6, height: 6, borderRadius: '50%', background: COLORS.purple }} />
+                )}
               </Link>
             </div>
           ))}
         </nav>
-        <div className="side-foot">{who}</div>
+        <div className="side-foot">
+          <span>{who}</span>
+          {who !== 'guest' && <span className="role-badge">{who.split('·')[1]?.trim()}</span>}
+        </div>
       </aside>
+
       <main id="main">
         <header className="topbar">
           <nav className="breadcrumbs" aria-label="Breadcrumb">
             <Link to="/overview">Trace</Link>
             <ChevronRight size={14} strokeWidth={1.75} className="bc-sep" aria-hidden />
-            <Link to={`/${view}`} style={{ color: detailId ? 'var(--muted)' : 'var(--text)' }}>{view}</Link>
+            <Link to={`/${view}`} style={{ color: detailId ? 'hsl(0 0% 64%)' : 'hsl(0 0% 96%)' }}>{view}</Link>
             {detailId && (
               <>
                 <ChevronRight size={14} strokeWidth={1.75} className="bc-sep" aria-hidden />
-                <span className="mono">{detailId.slice(0, 8)}…</span>
+                <span className="mono">{detailId.slice(0, 8)}...</span>
               </>
             )}
           </nav>
           <div className="row search-row">
             <div className="search-field">
               <Search size={15} strokeWidth={1.75} aria-hidden />
-              <input data-testid="global-search" aria-label="Search" placeholder="Search issues, events, devices…" value={q}
+              <input data-testid="global-search" aria-label="Search" placeholder="Search... (Ctrl+K)" value={q}
                 onChange={e => setQ(e.target.value)} onKeyDown={e => e.key === 'Enter' && doSearch()} />
             </div>
-            <button type="button" className="btn secondary" onClick={doSearch}>Search</button>
-            <button type="button" className="btn secondary" data-testid="auth-btn" onClick={async () => {
+            <Button type="button" className="secondary" variant="secondary" size="sm" onClick={doSearch}>Search</Button>
+
+            {/* Notification Center Dropdown */}
+            <div className="notif-bell-wrap" ref={notifRef}>
+              <button
+                type="button"
+                className="notif-bell-btn"
+                title="Notification Center"
+                aria-label="Notification Center"
+                aria-expanded={notifOpen}
+                onClick={() => {
+                  setNotifOpen(o => !o)
+                  if (!notifOpen) markAllAlertsRead()
+                }}
+              >
+                {notifEnabled ? <Bell size={16} strokeWidth={1.75} /> : <BellOff size={16} strokeWidth={1.75} />}
+                {alerts.filter(a => !a.read).length > 0 && (
+                  <span className="notif-badge">{alerts.filter(a => !a.read).length}</span>
+                )}
+              </button>
+
+              {notifOpen && (
+                <div className="notif-dropdown" role="region" aria-label="Notifications">
+                  <div className="notif-dropdown-header">
+                    <h3>
+                      <Bell size={15} /> Notifications
+                    </h3>
+                    <div className="notif-controls">
+                      <button
+                        type="button"
+                        className="btn ghost"
+                        title={soundEnabled ? 'Mute alerts' : 'Enable alert sounds'}
+                        onClick={() => {
+                          const next = !soundEnabled
+                          setSoundEnabled(next)
+                          dispatchToast({ id: generateId(), type: 'info', message: next ? 'Alert sounds enabled' : 'Sounds disabled' })
+                        }}
+                      >
+                        {soundEnabled ? <Volume2 size={14} /> : <VolumeX size={14} />}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn secondary"
+                        onClick={() => {
+                          sendTestNotification()
+                          dispatchToast({ id: generateId(), type: 'success', message: 'Test notification sent!' })
+                        }}
+                      >
+                        Test
+                      </button>
+                    </div>
+                  </div>
+
+                  {notifPermission !== 'granted' && (
+                    <div style={{ padding: '0.65rem 0.85rem', background: 'rgba(234, 179, 8, 0.08)', borderBottom: '1px solid rgba(234, 179, 8, 0.2)', fontSize: '0.75rem' }}>
+                      <div style={{ color: '#facc15', fontWeight: 600, marginBottom: '0.2rem' }}>Browser Permission Required</div>
+                      <div style={{ color: 'hsl(0 0% 64%)', marginBottom: '0.5rem' }}>Allow notifications to receive desktop alerts.</div>
+                      <button
+                        type="button"
+                        className="btn primary"
+                        style={{ width: '100%', fontSize: '0.75rem', padding: '0.3rem 0.6rem' }}
+                        onClick={async () => {
+                          const granted = await requestNotificationPermission()
+                          if (granted) {
+                            dispatchToast({ id: generateId(), type: 'success', message: 'Browser notifications enabled!' })
+                            sendTestNotification()
+                          } else {
+                            dispatchToast({ id: generateId(), type: 'error', message: 'Permission not granted by browser.' })
+                          }
+                        }}
+                      >
+                        Enable Browser Alerts
+                      </button>
+                    </div>
+                  )}
+
+                  <div className="notif-list">
+                    {alerts.length === 0 ? (
+                      <div className="notif-empty">
+                        <Bell size={24} style={{ opacity: 0.4 }} />
+                        <span>No recent alerts</span>
+                        <span style={{ fontSize: '0.7rem' }}>Trace is monitoring events and incidents in real time.</span>
+                      </div>
+                    ) : (
+                      alerts.map(a => (
+                        <div
+                          key={a.id}
+                          className={`notif-item ${a.severity}`}
+                          onClick={() => {
+                            setNotifOpen(false)
+                            if (a.url) {
+                              const path = a.url.startsWith('/') ? a.url : `/${a.url}`
+                              navigate(path)
+                            }
+                          }}
+                        >
+                          <div className="notif-item-top">
+                            <span className="notif-item-title">{a.title}</span>
+                            <span className="notif-item-time">{fmtTime(new Date(a.timestamp).toISOString())}</span>
+                          </div>
+                          <div className="notif-item-body">{a.body}</div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+
+                  <div className="notif-dropdown-footer">
+                    <span>{alerts.length} alert(s)</span>
+                    {alerts.length > 0 && (
+                      <button
+                        type="button"
+                        className="btn ghost"
+                        style={{ fontSize: '0.7rem', padding: '0.1rem 0.35rem' }}
+                        onClick={() => {
+                          clearAlertHistory()
+                          dispatchToast({ id: generateId(), type: 'info', message: 'Alert history cleared' })
+                        }}
+                      >
+                        Clear history
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <Button type="button" className="secondary" variant="secondary" size="sm" data-testid="auth-btn" onClick={async () => {
               if (token()) {
                 try { await api('/api/auth/logout', { method: 'POST' }) } catch { /* */ }
                 setToken(''); await refreshAuth(); navigate('/overview')
+                dispatchToast({ id: generateId(), type: 'success', message: 'Signed out' })
               } else setLoginOpen(true)
             }}>
               {token() ? <><LogOut size={15} strokeWidth={1.75} /> Logout</> : <><LogIn size={15} strokeWidth={1.75} /> Login</>}
-            </button>
+            </Button>
             <a className="btn ghost" href="/api/auth/oidc/login">OIDC</a>
           </div>
         </header>
+
         <section className="content">
+          {/* Browser Notification Prompt Banner */}
+          {isNotificationSupported() && notifPermission === 'default' && !promptDismissed && (
+            <div className="notif-banner" role="alert" aria-label="Notification Permission">
+              <div className="notif-banner-left">
+                <div className="notif-banner-icon">
+                  <Bell size={18} />
+                </div>
+                <div className="notif-banner-text">
+                  <h4>Enable Browser Notifications?</h4>
+                  <p>Receive real-time alerts on your desktop for new critical errors, Fatal failures, and hardware anomalies.</p>
+                </div>
+              </div>
+              <div className="notif-banner-actions">
+                <button
+                  type="button"
+                  className="btn primary"
+                  style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}
+                  onClick={async () => {
+                    const granted = await requestNotificationPermission()
+                    if (granted) {
+                      dispatchToast({ id: generateId(), type: 'success', message: 'Browser notifications enabled successfully!' })
+                      sendTestNotification()
+                    } else {
+                      dispatchToast({ id: generateId(), type: 'info', message: 'Permission ignored or blocked.' })
+                    }
+                  }}
+                >
+                  <Check size={14} style={{ marginRight: 4 }} /> Enable Notifications
+                </button>
+                <button
+                  type="button"
+                  className="btn secondary"
+                  style={{ padding: '0.35rem 0.6rem', fontSize: '0.78rem' }}
+                  onClick={() => setPromptDismissedState(true)}
+                >
+                  Later
+                </button>
+                <button
+                  type="button"
+                  className="btn ghost"
+                  style={{ padding: '0.35rem 0.5rem', fontSize: '0.75rem' }}
+                  title="Do not ask again"
+                  onClick={() => {
+                    setPromptDismissed(true)
+                    setPromptDismissedState(true)
+                    dispatchToast({ id: generateId(), type: 'info', message: 'Preference saved.' })
+                  }}
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            </div>
+          )}
+
           {loginOpen && (
             <div className="panel login-panel" role="dialog" aria-label="Login" data-testid="login-dialog">
               <h2>Sign in to Trace</h2>
               <label>Email <input data-testid="login-email" type="email" value={loginEmail} onChange={e => setLoginEmail(e.target.value)} /></label>
               <label>Password <input data-testid="login-password" type="password" value={loginPass} onChange={e => setLoginPass(e.target.value)} onKeyDown={e => e.key === 'Enter' && doLogin()} /></label>
               <div className="row gap">
-                <button type="button" className="btn" data-testid="login-submit" onClick={doLogin}>Continue</button>
-                <button type="button" className="btn secondary" onClick={() => setLoginOpen(false)}>Cancel</button>
+                <Button type="button" variant="default" data-testid="login-submit" onClick={doLogin}>Sign in</Button>
+                <Button type="button" variant="secondary" onClick={() => setLoginOpen(false)}>Cancel</Button>
               </div>
               <p className="meta">First-boot password: <code>data/bootstrap-admin.txt</code></p>
             </div>
           )}
+
           {liveAt > 0 && (
             <div className="live-pill" title="Auto-refresh enabled">
               <span className="live-dot" aria-hidden />
               Live · {new Date(liveAt).toLocaleTimeString()}
+              <Button type="button" variant="ghost" style={{ marginLeft: 8, fontSize: '0.65rem', padding: '0.1rem 0.35rem' }} onClick={() => {
+                setPollInterval(p => {
+                  const next = p === 5000 ? 15000 : 5000
+                  dispatchToast({ id: generateId(), type: 'info', message: next === 15000 ? 'Polling every 15s' : 'Live refresh enabled' })
+                  return next
+                })
+              }}>
+                {pollInterval === 5000 ? '5s' : '15s'}
+              </Button>
             </div>
           )}
+
           {err && <div className="empty" role="alert" data-testid="error-banner">Error: {err}</div>}
+
           {search && (
             <div className="panel" style={{ marginBottom: '1rem' }}>
               <div className="panel-head"><h2>Search results</h2>
-                <button type="button" className="btn secondary" onClick={() => setSearch(null)}>Close</button>
+                <Button type="button" variant="secondary" onClick={() => setSearch(null)}>Close</Button>
               </div>
               <SearchResults data={search} onOpen={(v, itemId) => { setSearch(null); go(v, itemId) }} />
             </div>
           )}
-          {loading && !search && !data && !detail && <Loading label="Updating…" />}
+
+          {loading && !search && !data && !detail && <Loading label="Updating..." />}
+
           {!err && !search && detail && (
             <Detail view={view} data={detail} onBack={() => go(view)} onNavigate={go}
-              reload={async () => { setLoading(true); try { setDetail(await loadDetail(view, detailId)) } catch (e: any) { setErr(e.message) } finally { setLoading(false) } }} />
+              reload={async () => {
+                setLoading(true)
+                try {
+                  setDetail(await loadDetail(view, detailId))
+                  dispatchToast({ id: generateId(), type: 'success', message: 'Detail refreshed' })
+                } catch (e: any) { setErr(e.message) } finally { setLoading(false) }
+              }} />
           )}
+
           {!err && !search && !detail && data && (
             <>
               {['issues', 'events', 'devices'].includes(view) && (
@@ -253,22 +662,23 @@ function Shell() {
                   <label>Status <input value={filter.status} onChange={e => setFilter({ ...filter, status: e.target.value })} placeholder="open" /></label>
                   <label>Severity <input value={filter.severity} onChange={e => setFilter({ ...filter, severity: e.target.value })} placeholder="fatal" /></label>
                   <label>Filter <input value={filter.q} onChange={e => setFilter({ ...filter, q: e.target.value })} placeholder="text" /></label>
-                  <button type="button" className="btn secondary" onClick={() => setPage(0)}>Apply</button>
+                  <Button type="button" variant="secondary" onClick={() => setPage(0)}>Apply</Button>
                 </div>
               )}
-              <ViewBody view={view} data={data} onOpen={(itemId) => go(view, itemId)} go={go}
+              <ViewBody view={view} data={data} onOpen={(itemId) => go(view, itemId)} go={go} dispatchToast={dispatchToast}
                 reload={async () => {
                   try {
                     const d = await load(view, page, filter, limit)
                     setData(d)
                     setLiveAt(Date.now())
+                    dispatchToast({ id: generateId(), type: 'info', message: 'View refreshed' })
                   } catch (e: any) { setErr(e.message) }
                 }} />
               {total > 0 && (
                 <div className="pager" aria-label="Pagination">
-                  <button type="button" className="btn secondary" disabled={page <= 0} onClick={() => setPage(p => p - 1)}>Prev</button>
+                  <Button type="button" variant="secondary" disabled={page <= 0} onClick={() => setPage(p => p - 1)}>Prev</Button>
                   <span>Page {page + 1} / {pages} · {total} total</span>
-                  <button type="button" className="btn secondary" disabled={page + 1 >= pages} onClick={() => setPage(p => p + 1)}>Next</button>
+                  <Button type="button" variant="secondary" disabled={page + 1 >= pages} onClick={() => setPage(p => p + 1)}>Next</Button>
                 </div>
               )}
             </>
@@ -300,6 +710,8 @@ async function load(v: View, pageN: number, f: { status: string; severity: strin
     case 'dead': return api('/api/jobs/dead')
     case 'audit': return api('/api/audit')
     case 'settings': return Promise.all([api('/api/bootstrap'), api('/api/settings').catch(() => null)]).then(([b, s]) => ({ ...b, settings: s }))
+    case 'analytics': return api('/api/analytics').catch(() => ({ export_options: [], sinks: [], last_export: null }))
+    case 'compliance': return api('/api/compliance').catch(() => ({ security_features: [], audit_exports: [], posture: 'healthy' }))
   }
 }
 
@@ -341,8 +753,8 @@ function SearchResults({ data, onOpen }: { data: any; onOpen: (v: View, id: stri
   )
 }
 
-function ViewBody({ view, data, onOpen, go, reload }: {
-  view: View; data: any; onOpen: (id: string) => void; go: (v: View, id?: string) => void; reload: () => void
+function ViewBody({ view, data, onOpen, go, reload, dispatchToast = () => {} }: {
+  view: View; data: any; onOpen: (id: string) => void; go: (v: View, id?: string) => void; reload: () => void; dispatchToast?: (t: Toast) => void
 }) {
   if (view === 'overview') return <Overview data={data} go={go} />
   if (view === 'issues') return <IssuesList items={data.items || []} onOpen={onOpen} />
@@ -352,12 +764,12 @@ function ViewBody({ view, data, onOpen, go, reload }: {
         <table>
           <thead><tr><th>State</th><th>Pipeline</th><th>Event</th><th>Sev</th><th>Received</th></tr></thead>
           <tbody>
-            {(data.items || []).map((e: any) => (
-              <tr key={e.id} style={{ cursor: 'pointer' }} onClick={() => onOpen(e.id)}>
-                <td><span className="badge">{e.state}</span></td>
+            {(data.items || []).map((e: any, idx: number) => (
+              <tr key={e.id} className="animate-fade-in-up" style={{ cursor: 'pointer', animationDelay: `${idx * 0.03}s` }} onClick={() => onOpen(e.id)}>
+                <td><Badge variant="outline">{e.state}</Badge></td>
                 <td><span className="tag">{e.pipeline || 'issue'}</span></td>
                 <td className="mono"><Link to={`/events/${e.id}`} onClick={ev => { ev.preventDefault(); onOpen(e.id) }}>{e.event_id}</Link></td>
-                <td><span className={`badge sev-${e.severity}`}>{e.severity}</span></td>
+                <td><Badge className={`sev-${e.severity}`}>{e.severity}</Badge></td>
                 <td className="meta">{fmtTime(e.received_at)}</td>
               </tr>
             ))}
@@ -372,10 +784,10 @@ function ViewBody({ view, data, onOpen, go, reload }: {
         <table>
           <thead><tr><th>Device</th><th>Status</th><th>Product</th><th>Firmware</th><th>Last seen</th></tr></thead>
           <tbody>
-            {(data.items || []).map((d: any) => (
-              <tr key={d.id} style={{ cursor: 'pointer' }} onClick={() => onOpen(d.id)}>
+            {(data.items || []).map((d: any, idx: number) => (
+              <tr key={d.id} className="animate-fade-in-up" style={{ cursor: 'pointer', animationDelay: `${idx * 0.03}s` }} onClick={() => onOpen(d.id)}>
                 <td className="mono">{d.device_id}</td>
-                <td><span className={`badge ${sevClass(d.status)}`}>{d.status}</span></td>
+                <td><Badge className={sevClass(d.status)}>{d.status}</Badge></td>
                 <td>{d.product || '—'}</td>
                 <td className="mono">{d.firmware_version || '—'}</td>
                 <td className="meta">{fmtTime(d.last_seen)}</td>
@@ -398,8 +810,8 @@ function ViewBody({ view, data, onOpen, go, reload }: {
             </tr>
           </thead>
           <tbody>
-            {items.map((row: any) => (
-              <tr key={row.id}>
+            {items.map((row: any, idx: number) => (
+              <tr key={row.id} className="animate-fade-in-up" style={{ animationDelay: `${idx * 0.03}s` }}>
                 {view === 'boots' && <>
                   <td className="mono">{row.boot_id}</td>
                   <td className="mono">{row.device_id || '—'}</td>
@@ -409,9 +821,9 @@ function ViewBody({ view, data, onOpen, go, reload }: {
                 {view === 'dead' && <>
                   <td>{row.type}</td><td>{row.attempts}</td>
                   <td className="meta">{row.last_error}</td>
-                  <td><button type="button" className="btn secondary" onClick={async () => {
+                  <td><Button type="button" variant="secondary" size="sm" onClick={async () => {
                     await api('/api/jobs/dead/' + row.id + '/requeue', { method: 'POST' }); reload()
-                  }}>Requeue</button></td>
+                  }}>Requeue</Button></td>
                 </>}
               </tr>
             ))}
@@ -439,12 +851,12 @@ function ViewBody({ view, data, onOpen, go, reload }: {
           </thead>
           <tbody>
             {items.map((row: any, idx: number) => (
-              <tr key={row.id || idx}>
-                {view === 'releases' && <><td><Link to={`/releases/${row.id}`}>{row.version}</Link></td><td className="mono">{row.build_id}</td><td className="mono">{row.git_commit || '—'}</td><td><span className="badge">{row.status}</span></td></>}
-                {view === 'artifacts' && <><td className="mono">{row.build_id}</td><td>{row.architecture}</td><td><span className="badge">{row.status}</span></td><td className="mono">{(row.sha256 || '').slice(0, 12)}</td></>}
+              <tr key={row.id || idx} className="animate-fade-in-up" style={{ animationDelay: `${idx * 0.03}s` }}>
+                {view === 'releases' && <><td><Link to={`/releases/${row.id}`}>{row.version}</Link></td><td className="mono">{row.build_id}</td><td className="mono">{row.git_commit || '—'}</td><td><Badge>{row.status}</Badge></td></>}
+                {view === 'artifacts' && <><td className="mono">{row.build_id}</td><td>{row.architecture}</td><td><Badge>{row.status}</Badge></td><td className="mono">{(row.sha256 || '').slice(0, 12)}</td></>}
                 {view === 'alerts' && <><td>{row.name}</td><td>{row.kind}</td><td>{row.channel}</td><td>{row.cooldown_sec}s</td></>}
                 {view === 'channels' && <><td>{row.name}</td><td>{row.kind}</td><td>{String(row.enabled)}</td></>}
-                {view === 'relays' && <><td className="mono">{row.relay_id}</td><td>{row.version}</td><td><span className="badge">{row.status}</span></td><td className="meta">{fmtTime(row.last_heartbeat)}</td></>}
+                {view === 'relays' && <><td className="mono">{row.relay_id}</td><td>{row.version}</td><td><Badge>{row.status}</Badge></td><td className="meta">{fmtTime(row.last_heartbeat)}</td></>}
                 {view === 'projects' && <><td>{row.name}</td><td className="mono">{row.slug}</td><td className="meta">{row.description}</td></>}
                 {view === 'audit' && <><td className="meta">{fmtTime(row.created_at)}</td><td>{row.actor || '—'}</td><td>{row.action}</td><td className="mono">{row.target_type}</td></>}
                 {view === 'hardware' && <><td>{row.revision}</td><td>{row.fatal_events}</td><td>{row.events}</td></>}
@@ -453,36 +865,129 @@ function ViewBody({ view, data, onOpen, go, reload }: {
           </tbody>
         </table>
         {view === 'channels' && (
-          <button type="button" className="btn" style={{ marginTop: 12 }} onClick={async () => {
-            const kind = prompt('kind: slack|discord|webhook|email', 'slack') || 'slack'
-            const url = prompt('webhook_url')
-            if (!url) return
-            await api('/api/channels', { method: 'POST', body: { kind, name: kind, config: { webhook_url: url } } })
-            reload()
-          }}>Add channel</button>
+          <div style={{ marginTop: 12 }}>
+            <Button type="button" onClick={async () => {
+              const kind = prompt('kind: slack|discord|webhook|email', 'slack') || 'slack'
+              const url = prompt('webhook_url')
+              if (!url) return
+              await api('/api/channels', { method: 'POST', body: { kind, name: kind, config: { webhook_url: url } } })
+              reload()
+            }}>Add channel</Button>
+          </div>
         )}
         {view === 'projects' && (
-          <button type="button" className="btn" style={{ marginTop: 12 }} onClick={async () => {
-            const name = prompt('Project name')
-            if (!name) return
-            await api('/api/projects', { method: 'POST', body: { name, slug: name.toLowerCase().replace(/\s+/g, '-') } })
-            reload()
-          }}>New project</button>
+          <div style={{ marginTop: 12 }}>
+            <Button type="button" onClick={async () => {
+              const name = prompt('Project name')
+              if (!name) return
+              await api('/api/projects', { method: 'POST', body: { name, slug: name.toLowerCase().replace(/\s+/g, '-') } })
+              reload()
+            }}>New project</Button>
+          </div>
         )}
       </div>
     )
   }
   if (view === 'settings') {
     const st = data.settings || {}
+    const perm = getNotificationPermission()
+    const notifOn = isNotificationsEnabled()
+    const soundOn = isSoundEnabled()
+
     return (
       <div className="panel" data-testid="settings-panel">
         <h2>Project settings</h2>
         <p className="meta">Open UI: {String(data.open_ui)} · Bootstrapped: {String(data.bootstrapped)}</p>
+
+        {/* Browser Notifications & Real-Time Alerts Configuration */}
+        <div className="notif-widget" style={{ marginTop: '1.25rem', marginBottom: '1.25rem' }}>
+          <div className="notif-widget-head">
+            <h3>
+              <Bell size={16} /> Browser Notifications & Real-Time Alerts
+            </h3>
+            <span className={`notif-status-badge ${perm}`}>
+              {perm === 'granted' ? 'Permission Granted' : perm === 'denied' ? 'Blocked in Browser' : 'Permission Pending'}
+            </span>
+          </div>
+          <p className="meta" style={{ marginTop: 0, marginBottom: '1rem' }}>
+            Configure how Trace alerts your development environment about new Fatal errors, queue failures, and hardware anomalies.
+          </p>
+          <div className="grid-2">
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem', padding: '0.5rem 0.75rem', background: 'rgba(255,255,255,0.02)', borderRadius: '0.375rem' }}>
+                <div>
+                  <strong>Desktop Notifications (Push)</strong>
+                  <div className="meta" style={{ fontSize: '0.75rem' }}>Displays native OS cards when critical incidents are detected</div>
+                </div>
+                <Button
+                  type="button"
+                  variant={notifOn ? 'default' : 'secondary'}
+                  style={{ fontSize: '0.75rem', padding: '0.25rem 0.6rem' }}
+                  onClick={async () => {
+                    if (perm !== 'granted') {
+                      const granted = await requestNotificationPermission()
+                      if (!granted) return
+                    } else {
+                      setNotificationsEnabled(!notifOn)
+                    }
+                  }}
+                >
+                  {notifOn ? 'Enabled' : 'Disabled'}
+                </Button>
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.5rem 0.75rem', background: 'rgba(255,255,255,0.02)', borderRadius: '0.375rem' }}>
+                <div>
+                  <strong>Sound Effects</strong>
+                  <div className="meta" style={{ fontSize: '0.75rem' }}>Subtle chime via Web Audio API on critical events</div>
+                </div>
+                <Button
+                  type="button"
+                  variant={soundOn ? 'default' : 'secondary'}
+                  style={{ fontSize: '0.75rem', padding: '0.25rem 0.6rem' }}
+                  onClick={() => setSoundEnabled(!soundOn)}
+                >
+                  {soundOn ? 'Sound On' : 'Muted'}
+                </Button>
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+              <div style={{ padding: '0.5rem 0.75rem', background: 'rgba(255,255,255,0.02)', borderRadius: '0.375rem' }}>
+                <strong>Quick Test Actions</strong>
+                <div className="meta" style={{ fontSize: '0.75rem', marginBottom: '0.5rem' }}>Instantly validate sound and OS alert functionality</div>
+                <div className="row gap">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => {
+                      sendTestNotification()
+                    }}
+                  >
+                    <Bell size={14} style={{ marginRight: 4 }} /> Test Alert
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      clearAlertHistory()
+                    }}
+                  >
+                    Clear History ({getAlertHistory().length})
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div className="grid-2" style={{ marginTop: '1rem' }}>
           <div>
             <h3>Retention</h3>
             <pre>{JSON.stringify(st, null, 2)}</pre>
-            <button type="button" className="btn secondary" onClick={async () => {
+            <Button type="button" variant="secondary" onClick={async () => {
               await api('/api/settings', { method: 'PUT', body: {
                 retention_events_days: Number(prompt('events days', String(st.retention_events_days || 90))),
                 retention_health_days: Number(prompt('health days', String(st.retention_health_days || 30))),
@@ -491,26 +996,121 @@ function ViewBody({ view, data, onOpen, go, reload }: {
                 analyzer_version_min: st.analyzer_version_min || 1,
               }})
               reload()
-            }}>Edit retention</button>
+            }}>Edit retention</Button>
           </div>
           <div>
             <h3>Tokens & tools</h3>
             <pre>{JSON.stringify(data.project || {}, null, 2)}</pre>
             <div className="row gap">
-              <button type="button" className="btn" onClick={async () => {
+              <Button type="button" onClick={async () => {
                 const res = await api('/api/tokens', { method: 'POST', body: { name: 'relay', scopes: ['event:write', 'event:read', 'artifact:write'] } })
-                alert('Secret (once): ' + res.secret)
-              }}>Create token</button>
-              <button type="button" className="btn secondary" onClick={async () => {
+                dispatchToast({ id: generateId(), type: 'success', message: 'Token created: ' + res.secret })
+              }}>Create token</Button>
+              <Button type="button" variant="secondary" onClick={async () => {
                 const res = await api('/api/events/reprocess-stale', { method: 'POST' })
-                alert('Queued ' + res.queued)
-              }}>Reprocess stale</button>
+                dispatchToast({ id: generateId(), type: 'info', message: `Queued ${res.queued} events` })
+              }}>Reprocess stale</Button>
             </div>
             <p className="meta" style={{ marginTop: 12 }}>
               <a href="/metrics" target="_blank" rel="noreferrer">/metrics</a>
               {' · '}
               <a href="/openapi.json" target="_blank" rel="noreferrer">OpenAPI</a>
             </p>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  if (view === 'analytics') {
+    return (
+      <div className="panel" data-testid="analytics-panel">
+        <h2>Analytics Export</h2>
+        <p className="meta">Export events to external warehouses (ClickHouse, BigQuery, S3)</p>
+        <div className="grid-2" style={{ marginTop: '1rem' }}>
+          <div>
+            <h3>Export recent events</h3>
+            <div className="row gap" style={{ marginTop: 8 }}>
+              <Button type="button" onClick={async () => {
+                dispatchToast({ id: generateId(), type: 'info', message: 'Exporting last 24h...' })
+                try {
+                  const res = await api('/api/analytics/export?hours=24', { method: 'POST' })
+                  dispatchToast({ id: generateId(), type: 'success', message: `Exported ${res.rows} rows to ${res.sink}` })
+                } catch (e: any) {
+                  dispatchToast({ id: generateId(), type: 'error', message: e.message })
+                }
+              }}>Export 24h</Button>
+              <Button type="button" variant="secondary" onClick={async () => {
+                dispatchToast({ id: generateId(), type: 'info', message: 'Exporting last 7 days...' })
+                try {
+                  const res = await api('/api/analytics/export?hours=168', { method: 'POST' })
+                  dispatchToast({ id: generateId(), type: 'success', message: `Exported ${res.rows} rows to ${res.sink}` })
+                } catch (e: any) {
+                  dispatchToast({ id: generateId(), type: 'error', message: e.message })
+                }
+              }}>Export 7d</Button>
+            </div>
+            <p className="meta" style={{ marginTop: 12 }}>
+              Exports are written as NDJSON. Use with ClickHouse, BigQuery, or S3.
+            </p>
+          </div>
+          <div>
+            <h3>ClickHouse adapter</h3>
+            <pre>{`-- Import into ClickHouse
+CREATE TABLE trace_events (
+  event_id String,
+  severity String,
+  state String,
+  pipeline String,
+  received_at DateTime,
+  fingerprint String,
+  architecture Int16,
+  device_id String,
+  release String
+) ENGINE = ReplacingMergeTree(received_at)
+ORDER BY (event_id);
+
+-- Import NDJSON
+cat events-*.ndjson | clickhouse-client --query="INSERT INTO trace_events FORMAT JSONEachRow"
+`}</pre>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  if (view === 'compliance') {
+    return (
+      <div className="panel" data-testid="compliance-panel">
+        <h2>Compliance & Security</h2>
+        <p className="meta">Audit logs, SOC 2, and security posture</p>
+        <div className="grid-2" style={{ marginTop: '1rem' }}>
+          <div>
+            <h3>Security features</h3>
+            <ul style={{ paddingLeft: '1.1rem', marginTop: 8 }}>
+              <li>Rate limiting: 600 req/min per IP</li>
+              <li>Connection limiting: 64 per IP</li>
+              <li>Cookie: HttpOnly, Secure, SameSite=Lax</li>
+              <li>HMAC-signed Admin API (billing service)</li>
+              <li>SSRF protection on webhook URLs</li>
+              <li>X-Content-Type-Options, X-Frame-Options, Referrer-Policy headers</li>
+            </ul>
+          </div>
+          <div>
+            <h3>Audit log export</h3>
+            <p className="meta">Export audit logs to SIEM/S3 for compliance.</p>
+            <div className="row gap" style={{ marginTop: 8 }}>
+              <Button type="button" variant="secondary" size="sm" onClick={async () => {
+                dispatchToast({ id: generateId(), type: 'info', message: 'Downloading audit log export...' })
+                try {
+                  const res = await api('/api/audit?export=true')
+                  downloadText('audit-export.ndjson', res.data)
+                  dispatchToast({ id: generateId(), type: 'success', message: 'Audit log exported' })
+                } catch (e: any) {
+                  dispatchToast({ id: generateId(), type: 'error', message: e.message })
+                }
+              }}>Export audit log</Button>
+            </div>
           </div>
         </div>
       </div>
@@ -551,12 +1151,16 @@ function Overview({ data, go }: { data: any; go: (v: View, id?: string) => void 
       { key: 'unhandled', y: Number(h.unhandled) || 0 },
     ],
   }))
-  // Dual line: total events (avg-like) vs fatal (max-like) over 14d
   const dualA = eventsSeries
   const dualB = fatalSeries.length ? fatalSeries : eventsSeries.map((s: { x: string }) => ({ x: s.x, y: 0 }))
   const openCount = Number(data.open_issues) || 0
   const resolvedCount = Number(data.resolved_issues) || 0
   const eventsToday = Number(data.events_today) || 0
+
+  const perm = getNotificationPermission()
+  const notifOn = isNotificationsEnabled()
+  const soundOn = isSoundEnabled()
+  const alertsCount = getAlertHistory().length
 
   return (
     <div data-testid="overview" className="nw-dashboard">
@@ -571,11 +1175,47 @@ function Overview({ data, go }: { data: any; go: (v: View, id?: string) => void 
               <button key={r} type="button" className={range === r ? 'active' : ''} onClick={() => setRange(r)}>{r}</button>
             ))}
           </div>
-          <button type="button" className="btn secondary" onClick={() => downloadText('events-trend.csv', seriesToCSV(eventsSeries, 'events'))}>Export CSV</button>
+          <Button type="button" variant="secondary" size="sm" onClick={() => downloadText('events-trend.csv', seriesToCSV(eventsSeries, 'events'))}>Export CSV</Button>
           <span className="tag">{fmtCompact(data.events_total ?? 0)} events</span>
           <span className="tag">{fmtCompact(data.issues_total ?? 0)} issues</span>
         </div>
       </header>
+
+      {/* Live Alert Monitoring Bar */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.65rem 1rem', background: 'rgba(255,255,255,0.02)', border: '1px solid hsl(0 0% 12%)', borderRadius: '0.5rem', marginBottom: '1.25rem', fontSize: '0.8rem', gap: '0.75rem', flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+          <span className="live-dot" aria-hidden />
+          <strong>Real-Time Monitoring:</strong>
+          <span className={`notif-status-badge ${perm}`} style={{ fontSize: '0.68rem', padding: '0.1rem 0.45rem' }}>
+            {notifOn ? 'Notifications Active' : 'Notifications Inactive'}
+          </span>
+          <span className="meta" style={{ fontSize: '0.75rem' }}>
+            {soundOn ? 'Sound On' : 'Muted'} · {alertsCount} incidents logged
+          </span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            style={{ fontSize: '0.72rem', padding: '0.2rem 0.5rem' }}
+            onClick={() => {
+              sendTestNotification()
+            }}
+          >
+            <Bell size={13} style={{ marginRight: 4 }} /> Test Notification
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            style={{ fontSize: '0.72rem', padding: '0.2rem 0.5rem' }}
+            onClick={() => go('settings')}
+          >
+            <Settings size={13} style={{ marginRight: 4 }} /> Configure
+          </Button>
+        </div>
+      </div>
 
       <div className="nw-twin">
         <div className="panel nw-panel nw-metric-card">
@@ -602,7 +1242,7 @@ function Overview({ data, go }: { data: any; go: (v: View, id?: string) => void 
               </div>
             </div>
           </div>
-          <div className="nw-chart-slot">
+          <div className="nw-chart-slot animate-chart-grow">
             <StackedBarChart
               bars={severityBars}
               colors={{ ok: COLORS.nwOk, warn: COLORS.nwWarn, err: COLORS.nwErr }}
@@ -633,7 +1273,7 @@ function Overview({ data, go }: { data: any; go: (v: View, id?: string) => void 
               </div>
             </div>
           </div>
-          <div className="nw-chart-slot">
+          <div className="nw-chart-slot animate-chart-grow">
             <DualLineChart
               a={dualA}
               b={dualB}
@@ -657,14 +1297,14 @@ function Overview({ data, go }: { data: any; go: (v: View, id?: string) => void 
                 {eventsToday > 0 ? ` · ${fmtCompact(eventsToday)} events in 24h` : ''}
               </div>
               <p className="meta" style={{ margin: '0.2rem 0 0' }}>
-                Impacted <strong style={{ color: 'var(--text)', fontWeight: 600 }}>{data.devices ?? 0}</strong> devices
+                Impacted <strong style={{ color: 'hsl(0 0% 96%)', fontWeight: 600 }}>{data.devices ?? 0}</strong> devices
                 · {resolvedCount} handled · {openCount} unhandled
                 {data.fatal_open ? ` · ${data.fatal_open} fatal` : ''}
               </p>
             </div>
             <Link className="btn secondary" to="/issues">View</Link>
           </div>
-          <div className="nw-chart-slot tall">
+          <div className="nw-chart-slot tall animate-chart-grow">
             <StackedBarChart
               bars={exceptionBars.length ? exceptionBars : severityBars}
               colors={exceptionBars.length
@@ -719,10 +1359,10 @@ function Overview({ data, go }: { data: any; go: (v: View, id?: string) => void 
           <div className="panel-head">
             <div>
               <h2>Event volume</h2>
-              <p className="meta" style={{ margin: 0 }}>All events vs fatal · 14 days</p>
+              <p className="meta" style={{ margin: 0 }}>All events vs fatal · {range}</p>
             </div>
           </div>
-          <div className="nw-chart-slot">
+          <div className="nw-chart-slot animate-chart-grow">
             <DualAreaChart a={eventsSeries} b={fatalSeries} labelA="All events" labelB="Fatal" height={200} />
           </div>
         </div>
@@ -733,7 +1373,7 @@ function Overview({ data, go }: { data: any; go: (v: View, id?: string) => void 
               <p className="meta" style={{ margin: 0 }}>Hourly density</p>
             </div>
           </div>
-          <div className="nw-chart-slot">
+          <div className="nw-chart-slot animate-chart-grow">
             <AreaChart series={hourlySeries} color={COLORS.cyan} fillId="hourFill" height={200} showDots />
           </div>
         </div>
@@ -754,7 +1394,7 @@ function Overview({ data, go }: { data: any; go: (v: View, id?: string) => void 
         </div>
       </div>
 
-      {/* Exception feed — Nightwatch SKY-### style (TRC-###) */}
+      {/* Exception feed */}
       <div className="panel nw-panel">
         <div className="panel-head">
           <div>
@@ -766,13 +1406,13 @@ function Overview({ data, go }: { data: any; go: (v: View, id?: string) => void 
           <Link className="btn secondary" to="/issues">View all</Link>
         </div>
         <div className="nw-exception-list">
-          {(data.top_issues || []).map((i: any) => (
-            <button type="button" key={i.id} className="nw-exception" onClick={() => go('issues', i.id)}>
+          {(data.top_issues || []).map((i: any, idx: number) => (
+            <button type="button" key={i.id} className="nw-exception animate-fade-in-up" style={{ animationDelay: `${idx * 0.05}s` }} onClick={() => go('issues', i.id)}>
               <div className="nw-exception-id mono">{issueCode(i.id)}</div>
               <div className="nw-exception-body">
                 <div className="nw-exception-type">
-                  <span className={`badge sev-${i.severity || 'error'}`}>{(i.severity || 'error').toUpperCase()}</span>
-                  <span className={`badge ${sevClass(i.status)}`}>{i.status}</span>
+                  <Badge className={`sev-${i.severity || 'error'}`}>{(i.severity || 'error').toUpperCase()}</Badge>
+                  <Badge className={sevClass(i.status)}>{i.status}</Badge>
                 </div>
                 <div className="nw-exception-title">{i.title}</div>
                 <div className="meta">{fmtTime(i.last_seen)} · {i.event_count} events · {i.affected_devices} devices</div>
@@ -795,7 +1435,7 @@ function Overview({ data, go }: { data: any; go: (v: View, id?: string) => void 
             <p className="meta" style={{ margin: 0 }}>First-seen count · 14 days</p>
           </div>
         </div>
-        <div className="nw-chart-slot">
+        <div className="nw-chart-slot animate-chart-grow">
           <AreaChart series={issuesSeries} color={COLORS.pink} fillId="issFill" height={160} />
         </div>
       </div>
@@ -808,20 +1448,20 @@ function IssuesList({ items, onOpen }: { items: any[]; onOpen: (id: string) => v
   return (
     <div className="panel nw-panel" style={{ padding: 0, overflow: 'hidden' }} data-testid="issues-list">
       <div className="nw-exception-list">
-        {items.map((i: any) => (
-          <button type="button" key={i.id} className="nw-exception" onClick={() => onOpen(i.id)}>
+        {items.map((i: any, idx: number) => (
+          <button type="button" key={i.id} className="nw-exception animate-fade-in-up" style={{ animationDelay: `${idx * 0.03}s` }} onClick={() => onOpen(i.id)}>
             <div className="nw-exception-id mono">{issueCode(i.id)}</div>
             <div className="nw-exception-body">
               <div className="nw-exception-type">
-                <span className={`badge sev-${i.severity}`}>{i.severity}</span>
-                <span className={`badge ${sevClass(i.status)}`}>{i.status}</span>
-                {i.regression_count > 0 && <span className="badge warn">reg ×{i.regression_count}</span>}
+                <Badge className={`sev-${i.severity}`}>{i.severity}</Badge>
+                <Badge className={sevClass(i.status)}>{i.status}</Badge>
+                {i.regression_count > 0 && <Badge className="warn">reg ×{i.regression_count}</Badge>}
               </div>
               <div className="nw-exception-title">{i.title}</div>
               <div className="meta mono">{(i.fingerprint || '').slice(0, 20)} · {fmtTime(i.last_seen)}</div>
             </div>
             <div className="issue-stats" style={{ textAlign: 'right' }}>
-              <strong style={{ display: 'block', color: 'var(--text)' }}>{i.event_count}</strong>
+              <strong style={{ display: 'block', color: 'hsl(0 0% 96%)' }}>{i.event_count}</strong>
               <span className="meta">{i.affected_devices} devices</span>
             </div>
           </button>
@@ -867,7 +1507,7 @@ function IssueDetail({ data, onBack, reload }: { data: any; onBack: () => void; 
 
   return (
     <div data-testid="issue-detail">
-      <button type="button" className="btn secondary" onClick={onBack} style={{ marginBottom: 12 }}>← Issues</button>
+      <Button type="button" variant="secondary" onClick={onBack} style={{ marginBottom: 12 }}>← Issues</Button>
       <div className="panel nw-panel" style={{ marginBottom: 12 }}>
         <div className="row gap" style={{ justifyContent: 'space-between', alignItems: 'flex-start' }}>
           <div>
@@ -875,9 +1515,9 @@ function IssueDetail({ data, onBack, reload }: { data: any; onBack: () => void; 
             <h2 style={{ marginTop: 0 }}>{i.title}</h2>
           </div>
           <div className="row gap">
-            <span className={`badge ${sevClass(i.status)}`}>{i.status}</span>
-            <span className={`badge sev-${i.severity}`}>{i.severity}</span>
-            {i.regression_count > 0 && <span className="badge warn">reg ×{i.regression_count}</span>}
+            <Badge className={sevClass(i.status)}>{i.status}</Badge>
+            <Badge className={`sev-${i.severity}`}>{i.severity}</Badge>
+            {i.regression_count > 0 && <Badge className="warn">reg ×{i.regression_count}</Badge>}
           </div>
         </div>
         <div className="issue-summary">
@@ -893,17 +1533,17 @@ function IssueDetail({ data, onBack, reload }: { data: any; onBack: () => void; 
         </div>
         <div className="row gap" style={{ marginTop: 12 }}>
           {['open', 'investigating', 'resolved', 'ignored'].map(st => (
-            <button key={st} type="button" className="btn secondary" onClick={async () => {
+            <Button key={st} type="button" variant="secondary" onClick={async () => {
               await api('/api/issues/' + i.id + '/status', { method: 'POST', body: { status: st } })
               reload()
-            }}>{st}</button>
+            }}>{st}</Button>
           ))}
-          <button type="button" className="btn secondary" onClick={async () => {
+          <Button type="button" variant="secondary" onClick={async () => {
             const email = prompt('Assign to (email)')
             if (!email) return
             await api('/api/issues/' + i.id + '/assign', { method: 'POST', body: { email } })
             reload()
-          }}>Assign</button>
+          }}>Assign</Button>
         </div>
       </div>
       <div className="detail-grid">
@@ -917,9 +1557,9 @@ function IssueDetail({ data, onBack, reload }: { data: any; onBack: () => void; 
               <h3 style={{ margin: 0 }}>Breadcrumb replay</h3>
               {breadcrumbs.length > 0 && (
                 <div className="row gap">
-                  <button type="button" className="btn secondary" disabled={replayIdx <= 0} onClick={() => setReplayIdx(x => Math.max(0, x - 1))}>Prev</button>
+                  <Button type="button" variant="secondary" disabled={replayIdx <= 0} onClick={() => setReplayIdx(x => Math.max(0, x - 1))}>Prev</Button>
                   <span className="meta">{Math.min(replayIdx + 1, breadcrumbs.length)} / {breadcrumbs.length}</span>
-                  <button type="button" className="btn secondary" disabled={replayIdx >= breadcrumbs.length - 1} onClick={() => setReplayIdx(x => Math.min(breadcrumbs.length - 1, x + 1))}>Next</button>
+                  <Button type="button" variant="secondary" disabled={replayIdx >= breadcrumbs.length - 1} onClick={() => setReplayIdx(x => Math.min(breadcrumbs.length - 1, x + 1))}>Next</Button>
                 </div>
               )}
             </div>
@@ -934,7 +1574,7 @@ function IssueDetail({ data, onBack, reload }: { data: any; onBack: () => void; 
                 </div>
                 <div className="timeline">
                   {breadcrumbs.slice(0, 40).map((b: any, idx: number) => (
-                    <button type="button" key={idx} className={'timeline-item' + (idx === replayIdx ? ' active' : '')} onClick={() => setReplayIdx(idx)} style={{ width: '100%', textAlign: 'left', background: idx === replayIdx ? 'rgba(255,255,255,0.04)' : 'transparent', border: 0, color: 'inherit', font: 'inherit', cursor: 'pointer' }}>
+                    <button type="button" key={idx} className={'timeline-item' + (idx === replayIdx ? ' active' : '')} onClick={() => setReplayIdx(idx)} style={{ width: '100%', textAlign: 'left', background: idx === replayIdx ? 'rgba(139, 92, 246, 0.06)' : 'transparent', border: 0, color: 'inherit', font: 'inherit', cursor: 'pointer' }}>
                       <div className="timeline-dot" />
                       <div>
                         <div className="meta">{fmtTime(b.timestamp || b.ts || b.created_at)} · <span className="tag">{b.category || b.type || 'event'}</span></div>
@@ -987,12 +1627,12 @@ function IssueDetail({ data, onBack, reload }: { data: any; onBack: () => void; 
             {(data.comments || []).map((c: any) => (
               <div key={c.id} style={{ marginBottom: 8 }}><strong>{c.author || 'anon'}</strong><div className="meta">{c.body}</div></div>
             ))}
-            <button type="button" className="btn" onClick={async () => {
+            <Button type="button" onClick={async () => {
               const body = prompt('Comment')
               if (!body) return
               await api('/api/issues/' + i.id + '/comments', { method: 'POST', body: { body } })
               reload()
-            }}>Add comment</button>
+            }}>Add comment</Button>
           </div>
         </div>
       </div>
@@ -1013,22 +1653,22 @@ function Detail({ view, data, onBack, onNavigate, reload }: {
     const decoded = safeJSON(e.decoded) || {}
     return (
       <div data-testid="event-detail">
-        <button type="button" className="btn secondary" onClick={onBack} style={{ marginBottom: 12 }}>← Events</button>
+        <Button type="button" variant="secondary" onClick={onBack} style={{ marginBottom: 12 }}>← Events</Button>
         <div className="panel" style={{ marginBottom: 12 }}>
           <h2 className="mono" style={{ marginTop: 0 }}>{e.event_id}</h2>
           <div className="row gap">
-            <span className="badge">{e.state}</span>
-            <span className={`badge sev-${e.severity}`}>{e.severity}</span>
+            <Badge>{e.state}</Badge>
+            <Badge className={`sev-${e.severity}`}>{e.severity}</Badge>
             <span className="tag">{e.pipeline || 'issue'}</span>
             {analysis.architecture_name && <span className="tag">{analysis.architecture_name}</span>}
           </div>
           {analysis.summary && <p style={{ margin: '.75rem 0' }}>{analysis.summary}</p>}
           <div className="row gap">
             <a className="btn secondary" href={'/api/events/' + e.id + '/raw'}>Download raw</a>
-            <button type="button" className="btn" onClick={async () => {
+            <Button type="button" onClick={async () => {
               await api('/api/events/' + e.id + '/reprocess', { method: 'POST' })
               alert('Reprocess queued'); reload()
-            }}>Reprocess</button>
+            }}>Reprocess</Button>
           </div>
         </div>
         <div className="detail-grid">
@@ -1084,11 +1724,11 @@ function Detail({ view, data, onBack, onNavigate, reload }: {
     const d = data.device
     return (
       <div>
-        <button type="button" className="btn secondary" onClick={onBack} style={{ marginBottom: 12 }}>← Devices</button>
+        <Button type="button" variant="secondary" onClick={onBack} style={{ marginBottom: 12 }}>← Devices</Button>
         <div className="panel">
           <h2 className="mono" style={{ marginTop: 0 }}>{d.device_id}</h2>
           <div className="row gap">
-            <span className={`badge ${sevClass(d.status)}`}>{d.status}</span>
+            <Badge className={sevClass(d.status)}>{d.status}</Badge>
             <span className="meta">{d.product} · rev {d.hardware_revision || '—'}</span>
           </div>
           <div className="kv" style={{ marginTop: 12 }}>
@@ -1111,7 +1751,7 @@ function Detail({ view, data, onBack, onNavigate, reload }: {
   if (view === 'releases' && data.release) {
     return (
       <div>
-        <button type="button" className="btn secondary" onClick={onBack} style={{ marginBottom: 12 }}>← Releases</button>
+        <Button type="button" variant="secondary" onClick={onBack} style={{ marginBottom: 12 }}>← Releases</Button>
         <div className="panel">
           <h2 style={{ marginTop: 0 }}>{data.release.version}</h2>
           <p className="mono meta">{data.release.build_id} · {data.release.git_commit || 'no commit'}</p>
@@ -1128,7 +1768,7 @@ function Detail({ view, data, onBack, onNavigate, reload }: {
   }
   return (
     <div className="panel">
-      <button type="button" className="btn secondary" onClick={onBack}>← Back</button>
+      <Button type="button" variant="secondary" onClick={onBack}>← Back</Button>
       <pre>{JSON.stringify(data, null, 2)}</pre>
     </div>
   )

@@ -96,11 +96,14 @@ UPDATE jobs SET status='done', lease_token=NULL, leased_until=NULL WHERE id=$1 A
 
 func (q *Queue) Fail(ctx context.Context, id uuid.UUID, lease, msg string, retryIn time.Duration, maxAttempts int) error {
 	next := time.Now().Add(retryIn)
+	// Atomic increment: SET attempts = attempts + 1, then check if max reached.
+	// This prevents race conditions where two workers fail the same job simultaneously.
 	ct, err := q.Pool.Exec(ctx, `
 UPDATE jobs SET
-  status = CASE WHEN attempts >= $4 THEN 'dead' ELSE 'retry' END,
+  attempts = attempts + 1,
+  status = CASE WHEN attempts + 1 >= $4 THEN 'dead' ELSE 'retry' END,
   last_error=$3,
-  available_at = CASE WHEN attempts >= $4 THEN available_at ELSE $5 END,
+  available_at = CASE WHEN attempts + 1 >= $4 THEN available_at ELSE $5 END,
   lease_token=NULL,
   leased_until=NULL
 WHERE id=$1 AND lease_token=$2`, id, lease, msg, maxAttempts, next)
@@ -117,13 +120,40 @@ func (q *Queue) Enqueue(ctx context.Context, typ string, payload any) error {
 	if err := GuardEnqueue(ctx, q); err != nil {
 		return err
 	}
+	// MaxPayloadSize limits the size of enqueued job payloads to prevent
+	// excessive disk usage or OOM during JSON marshalling.
+	const MaxPayloadSize = 1 << 20 // 1MB
+
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
+	if len(raw) > MaxPayloadSize {
+		return fmt.Errorf("job payload too large: %d bytes (max %d)", len(raw), MaxPayloadSize)
+	}
 	// Deduplicate ready process_event jobs for same event_id when payload matches
 	_, err = q.Pool.Exec(ctx, `INSERT INTO jobs(type,payload,status) VALUES($1,$2,'ready')`, typ, raw)
 	return err
+}
+
+// ScanZombies finds jobs that are still in 'leased' status but whose lease
+// has expired (leased_until < now() - gracePeriod). These are typically
+// caused by worker crashes after claiming a job but before completing it.
+// The method resets them to 'ready' so other workers can claim them.
+// Returns the number of zombies found and reset.
+const DefaultZombieGracePeriod = 5 * time.Minute
+
+func (q *Queue) ScanZombies(ctx context.Context, gracePeriod time.Duration) (int64, error) {
+	if gracePeriod <= 0 {
+		gracePeriod = DefaultZombieGracePeriod
+	}
+	ct, err := q.Pool.Exec(ctx, `
+UPDATE jobs SET status='ready', lease_token=NULL, leased_until=NULL, available_at=now()
+WHERE status='leased' AND leased_until < now() - $1`, gracePeriod)
+	if err != nil {
+		return 0, err
+	}
+	return ct.RowsAffected(), nil
 }
 
 func (q *Queue) Depth(ctx context.Context) (int64, error) {

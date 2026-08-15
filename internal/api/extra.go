@@ -69,7 +69,7 @@ func (s *Server) apiCreateAlert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var actor *uuid.UUID
-	if sess, ok := sessionFrom(r); ok {
+	if sess, ok := sessionFrom(s, r); ok {
 		actor = &sess.UserID
 	}
 	oid, pid := p.OrganizationID, p.ID
@@ -235,7 +235,7 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiListOrgs(w http.ResponseWriter, r *http.Request) {
-	sess, ok := sessionFrom(r)
+	sess, ok := sessionFrom(s, r)
 	if !ok {
 		// open UI: list none
 		writeJSON(w, 200, map[string]any{"items": []any{}})
@@ -250,7 +250,7 @@ func (s *Server) apiListOrgs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiCreateOrg(w http.ResponseWriter, r *http.Request) {
-	sess, ok := sessionFrom(r)
+	sess, ok := sessionFrom(s, r)
 	if !ok {
 		writeErr(w, 401, "unauthorized", "login required", false)
 		return
@@ -281,7 +281,7 @@ func (s *Server) apiCreateOrg(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiListMembers(w http.ResponseWriter, r *http.Request) {
-	sess, ok := sessionFrom(r)
+	sess, ok := sessionFrom(s, r)
 	if !ok {
 		writeErr(w, 401, "unauthorized", "login required", false)
 		return
@@ -295,7 +295,7 @@ func (s *Server) apiListMembers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiInviteMember(w http.ResponseWriter, r *http.Request) {
-	sess, ok := sessionFrom(r)
+	sess, ok := sessionFrom(s, r)
 	if !ok {
 		writeErr(w, 401, "unauthorized", "login required", false)
 		return
@@ -324,7 +324,7 @@ func (s *Server) apiInviteMember(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiListProjects(w http.ResponseWriter, r *http.Request) {
-	sess, ok := sessionFrom(r)
+	sess, ok := sessionFrom(s, r)
 	if !ok {
 		p, err := s.Store.DefaultProject(r.Context())
 		if err != nil {
@@ -343,7 +343,7 @@ func (s *Server) apiListProjects(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiCreateProject(w http.ResponseWriter, r *http.Request) {
-	sess, ok := sessionFrom(r)
+	sess, ok := sessionFrom(s, r)
 	if !ok {
 		writeErr(w, 401, "unauthorized", "login required", false)
 		return
@@ -376,7 +376,7 @@ func (s *Server) apiCreateProject(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiUpdateProject(w http.ResponseWriter, r *http.Request) {
-	sess, ok := sessionFrom(r)
+	sess, ok := sessionFrom(s, r)
 	if !ok {
 		writeErr(w, 401, "unauthorized", "login required", false)
 		return
@@ -403,7 +403,7 @@ func (s *Server) apiUpdateProject(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiDeleteProject(w http.ResponseWriter, r *http.Request) {
-	sess, ok := sessionFrom(r)
+	sess, ok := sessionFrom(s, r)
 	if !ok {
 		writeErr(w, 401, "unauthorized", "login required", false)
 		return

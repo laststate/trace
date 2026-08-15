@@ -10,7 +10,7 @@ import (
 )
 
 func TestRateLimiter(t *testing.T) {
-	rl := newRateLimiter(5)
+	rl := newRateLimiter(5, 1000)
 	ip := "1.2.3.4"
 	for i := 0; i < 5; i++ {
 		if !rl.allow(ip) {
@@ -97,8 +97,8 @@ func TestClientIPFromXFF(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.RemoteAddr = "192.0.2.1:1234"
 	req.Header.Set("X-Forwarded-For", "8.8.8.8, 1.1.1.1")
-	if clientIPFrom(req) != "192.0.2.1" {
-		t.Fatal(clientIPFrom(req))
+	if clientIPFrom(req, "leftmost") != "192.0.2.1" {
+		t.Fatal(clientIPFrom(req, "leftmost"))
 	}
 	// Trusted proxy: honor XFF
 	ConfigureTrustedProxies("10.0.0.0/8")
@@ -106,7 +106,7 @@ func TestClientIPFromXFF(t *testing.T) {
 	req2 := httptest.NewRequest(http.MethodGet, "/", nil)
 	req2.RemoteAddr = "10.1.2.3:9999"
 	req2.Header.Set("X-Forwarded-For", "8.8.8.8, 1.1.1.1")
-	if clientIPFrom(req2) != "8.8.8.8" {
-		t.Fatal(clientIPFrom(req2))
+	if clientIPFrom(req2, "leftmost") != "8.8.8.8" {
+		t.Fatal(clientIPFrom(req2, "leftmost"))
 	}
 }

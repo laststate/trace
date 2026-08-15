@@ -70,6 +70,34 @@ cd web && npm ci && npm run build
 - Brand assets: `assets/brand/` (served as `/assets/brand/*`)
 - Playwright: `cd web && npm run test:e2e` (UI shell; see [docs/E2E.md](docs/E2E.md) for full stack)
 
+### Mock / Preview Mode
+
+Start the UI with realistic fake data, no DB or services required:
+
+```bash
+# Linux / macOS
+TRACE_MOCK=true go run ./cmd/trace
+
+# Windows
+set TRACE_MOCK=true && go run .\cmd\trace
+
+# Or use the convenience scripts
+./scripts/mock-preview.sh   # Linux / macOS
+scripts\mock-preview.bat    # Windows
+```
+
+Mock mode serves:
+- Pre-populated dashboard with realistic event/issue/device data
+- All API endpoints return fake but realistic responses
+- Charts render with deterministic data (same across restarts)
+- Authentication is bypassed — you're auto-logged in as admin
+
+Useful for:
+- UI/UX development without infra
+- Demos and presentations
+- Testing frontend changes against realistic data
+- Prototyping new views before backend is ready
+
 ## Ops
 
 ```bash

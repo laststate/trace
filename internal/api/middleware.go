@@ -20,16 +20,19 @@ type rateLimiter struct {
 	maxKeys int
 }
 
-func newRateLimiter(perMin int) *rateLimiter {
+func newRateLimiter(perMin, maxKeys int) *rateLimiter {
 	if perMin <= 0 {
 		perMin = 600
+	}
+	if maxKeys <= 0 {
+		maxKeys = 50_000
 	}
 	return &rateLimiter{
 		limit:   perMin,
 		window:  time.Minute,
 		hits:    map[string]int{},
 		resetAt: map[string]time.Time{},
-		maxKeys: 50_000,
+		maxKeys: maxKeys,
 	}
 }
 
@@ -37,7 +40,7 @@ func (rl *rateLimiter) allow(ip string) bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 	now := time.Now()
-	// periodic prune
+	// Periodically prune expired entries when map grows large.
 	if len(rl.hits) > rl.maxKeys {
 		for k, t := range rl.resetAt {
 			if now.After(t) {
@@ -45,7 +48,7 @@ func (rl *rateLimiter) allow(ip string) bool {
 				delete(rl.hits, k)
 			}
 		}
-		// still over: drop oldest half
+		// Still over: drop oldest half
 		if len(rl.hits) > rl.maxKeys {
 			i := 0
 			for k := range rl.hits {
@@ -101,12 +104,20 @@ func (c *connLimiter) release(ip string) {
 	}
 }
 
-// trustedProxies holds parsed CIDRs/IPs from TRACE_TRUSTED_PROXIES.
-var trustedProxyNets []*net.IPNet
+// TrustedProxyStore holds parsed CIDRs/IPs from TRACE_TRUSTED_PROXIES.
+// This is server-scoped so it can be updated on config reload.
+type TrustedProxyStore struct {
+	mu        sync.RWMutex
+	proxies   []*net.IPNet
+	allowXFF  bool // whether to honor X-Forwarded-For at all
+}
 
-// ConfigureTrustedProxies parses comma-separated IPs/CIDRs. Empty = never trust XFF.
+var globalProxyStore = &TrustedProxyStore{}
+
+// ConfigureTrustedProxies parses comma-separated IPs/CIDRs and updates the
+// server's trusted proxy list. Called on startup and on config reload.
 func ConfigureTrustedProxies(list string) {
-	trustedProxyNets = nil
+	store := &TrustedProxyStore{allowXFF: list != ""}
 	for _, p := range strings.Split(list, ",") {
 		p = strings.TrimSpace(p)
 		if p == "" {
@@ -123,9 +134,13 @@ func ConfigureTrustedProxies(list string) {
 		}
 		_, n, err := net.ParseCIDR(p)
 		if err == nil {
-			trustedProxyNets = append(trustedProxyNets, n)
+			store.proxies = append(store.proxies, n)
 		}
 	}
+	globalProxyStore.mu.Lock()
+	globalProxyStore.proxies = store.proxies
+	globalProxyStore.allowXFF = store.allowXFF
+	globalProxyStore.mu.Unlock()
 }
 
 func itoa(n int) string {
@@ -143,14 +158,16 @@ func itoa(n int) string {
 }
 
 func isTrustedProxy(ip string) bool {
-	if len(trustedProxyNets) == 0 {
+	globalProxyStore.mu.RLock()
+	defer globalProxyStore.mu.RUnlock()
+	if !globalProxyStore.allowXFF {
 		return false
 	}
 	parsed := net.ParseIP(ip)
 	if parsed == nil {
 		return false
 	}
-	for _, n := range trustedProxyNets {
+	for _, n := range globalProxyStore.proxies {
 		if n.Contains(parsed) {
 			return true
 		}
@@ -158,7 +175,10 @@ func isTrustedProxy(ip string) bool {
 	return false
 }
 
-func clientIPFrom(r *http.Request) string {
+// clientIPFrom extracts the client IP from the request, honoring X-Forwarded-For
+// only when the immediate peer is a trusted proxy. Supports configurable parsing
+// strategy (leftmost or rightmost original client).
+func clientIPFrom(r *http.Request, xffStrategy string) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
@@ -166,7 +186,13 @@ func clientIPFrom(r *http.Request) string {
 	// Only honor X-Forwarded-For when the immediate peer is a trusted proxy.
 	if isTrustedProxy(host) {
 		if x := r.Header.Get("X-Forwarded-For"); x != "" {
-			// left-most is original client when proxies append
+			// Parse X-Forwarded-For based on strategy:
+			// - "leftmost" (default): leftmost IP is original client (most proxies append right)
+			// - "rightmost": rightmost IP is original client (some proxies prepend left)
+			if xffStrategy == "rightmost" {
+				parts := strings.Split(x, ",")
+				return strings.TrimSpace(parts[len(parts)-1])
+			}
 			return strings.TrimSpace(strings.Split(x, ",")[0])
 		}
 		if x := r.Header.Get("X-Real-IP"); x != "" {
@@ -177,10 +203,10 @@ func clientIPFrom(r *http.Request) string {
 }
 
 func withSecurity(next http.Handler, ratePerMin, maxConns int) http.Handler {
-	rl := newRateLimiter(ratePerMin)
+	rl := newRateLimiter(ratePerMin, 50_000)
 	cl := newConnLimiter(maxConns)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := clientIPFrom(r)
+		ip := clientIPFrom(r, "leftmost")
 		if !cl.acquire(ip) {
 			http.Error(w, `{"error":{"code":"too_many_connections","message":"connection limit"}}`, http.StatusServiceUnavailable)
 			return

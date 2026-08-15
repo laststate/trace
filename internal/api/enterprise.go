@@ -371,7 +371,7 @@ func (s *Server) orgFrom(r *http.Request) (uuid.UUID, error) {
 	if h := r.Header.Get("X-Org-ID"); h != "" {
 		return uuid.Parse(h)
 	}
-	if sess, ok := sessionFrom(r); ok && sess.OrganizationID != uuid.Nil {
+	if sess, ok := sessionFrom(s, r); ok && sess.OrganizationID != uuid.Nil {
 		return sess.OrganizationID, nil
 	}
 	return uuid.Nil, errString("no org")

@@ -32,6 +32,13 @@ func (s *Server) apiEventsPage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "no_project", err.Error(), false)
 		return
 	}
+	
+	// Ensure organization matches current session before proceeding
+	if err := s.checkOrgMatch(r, p.OrganizationID); err != nil {
+		writeErr(w, 403, "access_denied", "organization mismatch", false)
+		return
+	}
+
 	opt := pageOpts(r)
 	items, total, err := s.Store.ListEventsPage(r.Context(), p.ID, opt)
 	if err != nil {
@@ -90,7 +97,7 @@ func (s *Server) apiIssueAssign(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "not_found", err.Error(), false)
 		return
 	}
-	actor := actorPtr(r)
+	actor := actorPtr(s, r)
 	oid, pid := p.OrganizationID, p.ID
 	s.Store.Audit(r.Context(), actor, nil, &oid, &pid, "issue.assign", "issue", id.String(), clientIP(r), r.UserAgent(), body)
 	writeJSON(w, 200, item)
@@ -114,7 +121,7 @@ func (s *Server) apiIssueMerge(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "invalid_json", err.Error(), false)
 		return
 	}
-	actor := actorPtr(r)
+	actor := actorPtr(s, r)
 	if err := s.Store.MergeIssues(r.Context(), p.ID, source, body.TargetID, actor); err != nil {
 		writeErr(w, 400, "merge_failed", err.Error(), false)
 		return
@@ -143,7 +150,7 @@ func (s *Server) apiIssueSplit(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "invalid_json", err.Error(), false)
 		return
 	}
-	actor := actorPtr(r)
+	actor := actorPtr(s, r)
 	ni, err := s.Store.SplitIssue(r.Context(), p.ID, source, body.EventIDs, body.Title, actor)
 	if err != nil {
 		writeErr(w, 400, "split_failed", err.Error(), false)
@@ -334,7 +341,7 @@ func (s *Server) apiCreateChannel(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "internal", err.Error(), true)
 		return
 	}
-	actor := actorPtr(r)
+	actor := actorPtr(s, r)
 	oid, pid := p.OrganizationID, p.ID
 	s.Store.Audit(r.Context(), actor, nil, &oid, &pid, "channel.create", "channel", id.String(), clientIP(r), r.UserAgent(), map[string]any{"kind": body.Kind})
 	writeJSON(w, 201, map[string]any{"id": id})
@@ -358,7 +365,7 @@ func (s *Server) apiReprocessBatch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiUpdateOrg(w http.ResponseWriter, r *http.Request) {
-	sess, ok := sessionFrom(r)
+	sess, ok := sessionFrom(s, r)
 	if !ok {
 		writeErr(w, 401, "unauthorized", "login required", false)
 		return
@@ -379,7 +386,7 @@ func (s *Server) apiUpdateOrg(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiUpdateMember(w http.ResponseWriter, r *http.Request) {
-	sess, ok := sessionFrom(r)
+	sess, ok := sessionFrom(s, r)
 	if !ok {
 		writeErr(w, 401, "unauthorized", "login required", false)
 		return
@@ -400,7 +407,7 @@ func (s *Server) apiUpdateMember(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiRemoveMember(w http.ResponseWriter, r *http.Request) {
-	sess, ok := sessionFrom(r)
+	sess, ok := sessionFrom(s, r)
 	if !ok {
 		writeErr(w, 401, "unauthorized", "login required", false)
 		return
@@ -452,8 +459,8 @@ func (s *Server) apiSearchFull(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, res)
 }
 
-func actorPtr(r *http.Request) *uuid.UUID {
-	if sess, ok := sessionFrom(r); ok {
+func actorPtr(s *Server, r *http.Request) *uuid.UUID {
+	if sess, ok := sessionFrom(s, r); ok {
 		u := sess.UserID
 		return &u
 	}
@@ -489,7 +496,7 @@ func (s *Server) apiRevokeToken(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "not_found", err.Error(), false)
 		return
 	}
-	actor := actorPtr(r)
+	actor := actorPtr(s, r)
 	oid, pid := p.OrganizationID, p.ID
 	s.Store.Audit(r.Context(), actor, nil, &oid, &pid, "token.revoke", "token", id.String(), clientIP(r), r.UserAgent(), nil)
 	writeJSON(w, 200, map[string]string{"status": "revoked"})
@@ -534,7 +541,7 @@ func (s *Server) apiRegister(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) apiLogout(w http.ResponseWriter, r *http.Request) {
 	s.clearSessionCookie(w)
-	sess, ok := sessionFrom(r)
+	sess, ok := sessionFrom(s, r)
 	if !ok {
 		// still clear cookie even without session context
 		writeJSON(w, 200, map[string]string{"status": "ok"})
@@ -565,7 +572,7 @@ func (s *Server) apiRequeueDead(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "bad_id", "invalid id", false)
 		return
 	}
-	actor := actorPtr(r)
+	actor := actorPtr(s, r)
 	if err := s.Store.RequeueDeadJob(r.Context(), id, actor); err != nil {
 		writeErr(w, 404, "not_found", err.Error(), false)
 		return
@@ -579,7 +586,7 @@ func (s *Server) apiDiscardDead(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "bad_id", "invalid id", false)
 		return
 	}
-	if err := s.Store.DiscardDeadJob(r.Context(), id, actorPtr(r)); err != nil {
+	if err := s.Store.DiscardDeadJob(r.Context(), id, actorPtr(s, r)); err != nil {
 		writeErr(w, 404, "not_found", err.Error(), false)
 		return
 	}

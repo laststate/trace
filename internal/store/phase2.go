@@ -144,6 +144,19 @@ func (s *Store) CreateUser(ctx context.Context, orgID uuid.UUID, email, password
 	return u, nil
 }
 
+// UserIsMemberOfOrg reports whether the given user has any membership in the
+// given organization. Used by tenant middleware to validate X-Org-ID header.
+func (s *Store) UserIsMemberOfOrg(ctx context.Context, userID, orgID uuid.UUID) (bool, error) {
+	var ok bool
+	err := s.Pool.QueryRow(ctx, `
+SELECT EXISTS(SELECT 1 FROM memberships WHERE user_id=$1 AND organization_id=$2)`,
+		userID, orgID).Scan(&ok)
+	if err != nil {
+		return false, err
+	}
+	return ok, nil
+}
+
 // AcceptInvite redeems invite token and adds membership.
 func (s *Store) AcceptInvite(ctx context.Context, tokenSecret string, password, name string) (User, Session, string, error) {
 	rows, err := s.Pool.Query(ctx, `

@@ -1,13 +1,19 @@
+import React from 'react'
 import type { LucideIcon } from 'lucide-react'
 import {
   Activity,
   AlertTriangle,
   Archive,
   ArrowLeftRight,
+  BarChart3,
+  Bell,
+  BellOff,
   Box,
+  Check,
   ChevronRight,
   CircuitBoard,
   ClipboardList,
+  ExternalLink,
   Gauge,
   HardDrive,
   LayoutDashboard,
@@ -20,8 +26,12 @@ import {
   Settings,
   Shield,
   Skull,
+  Sparkles,
   Tag,
   Upload,
+  Volume2,
+  VolumeX,
+  X,
   Zap,
 } from 'lucide-react'
 import type { View } from './nav'
@@ -42,6 +52,8 @@ const NAV_ICONS: Record<View, LucideIcon> = {
   dead: Skull,
   audit: ClipboardList,
   settings: Settings,
+  analytics: BarChart3,
+  compliance: Shield,
 }
 
 export function NavIcon({ view, size = 16 }: { view: View; size?: number }) {
@@ -53,7 +65,12 @@ export {
   Activity,
   AlertTriangle,
   Archive,
+  BarChart3,
+  Bell,
+  BellOff,
+  Check,
   ChevronRight,
+  ExternalLink,
   Gauge,
   LogIn,
   LogOut,
@@ -61,4 +78,8 @@ export {
   Search,
   Settings,
   Shield,
+  Sparkles,
+  Volume2,
+  VolumeX,
+  X,
 }

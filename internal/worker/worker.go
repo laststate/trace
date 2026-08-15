@@ -26,6 +26,16 @@ import (
 
 const SymbolizerVersion = 2
 
+// DecodeError represents a failure to decode an event payload.
+// It carries the error type so downstream consumers can distinguish
+// decode failures from other processing failures.
+type DecodeError struct {
+	Inner error
+}
+
+func (e *DecodeError) Error() string { return e.Inner.Error() }
+func (e *DecodeError) Unwrap() error { return e.Inner }
+
 type Worker struct {
 	Store  *store.Store
 	Queue  queue.Jober
@@ -73,27 +83,32 @@ func (w *Worker) tick(ctx context.Context) {
 		return
 	}
 
-	done := make(chan struct{})
+	// Renewal context: cancelled if Renew fails to prevent split-brain
+	// (another worker claiming the same job while this one is still processing).
+	parentCtx, cancel := context.WithCancel(ctx)
+	renewDone := make(chan struct{})
 	go func() {
 		ren := time.NewTicker(w.Lease / 3)
 		defer ren.Stop()
 		for {
 			select {
-			case <-done:
+			case <-renewDone:
 				return
-			case <-ctx.Done():
+			case <-parentCtx.Done():
 				return
 			case <-ren.C:
-				if err := w.Queue.Renew(ctx, job.ID, job.Lease, w.Lease); err != nil {
+				if err := w.Queue.Renew(parentCtx, job.ID, job.Lease, w.Lease); err != nil {
 					w.Log.Error("lease renew failed — aborting work to avoid split brain", "job", job.ID, "err", err)
+					cancel()
 					return
 				}
 			}
 		}
 	}()
 
-	err = w.handle(ctx, job)
-	close(done)
+	err = w.handle(parentCtx, job)
+	close(renewDone)
+	cancel()
 
 	if err != nil {
 		metrics.JobsFailed.Add(1)
@@ -103,6 +118,17 @@ func (w *Worker) tick(ctx context.Context) {
 		}
 		return
 	}
+
+	// If Renew failed (context cancelled), the lease is invalid — mark job as failed
+	// to prevent duplicate processing by another worker.
+	if parentCtx.Err() != nil && !errors.Is(parentCtx.Err(), context.Canceled) {
+		w.Log.Warn("lease invalid after handle — failing job to prevent duplicate processing", "job", job.ID, "err", parentCtx.Err())
+		if ferr := w.Queue.Fail(ctx, job.ID, job.Lease, "lease_invalid: "+parentCtx.Err().Error(), time.Duration(job.Attempt+1)*time.Second, 20); ferr != nil {
+			w.Log.Error("queue fail (lease invalid)", "job", job.ID, "err", ferr)
+		}
+		return
+	}
+
 	metrics.JobsCompleted.Add(1)
 	if cerr := w.Queue.Complete(ctx, job.ID, job.Lease); cerr != nil {
 		w.Log.Error("queue complete", "job", job.ID, "err", cerr)
@@ -117,6 +143,9 @@ func (w *Worker) fireEscalationLevel(ctx context.Context, projectID, issueID, po
 				continue
 			}
 			res, _ := notify.DeliverWithRetry(ctx, "webhook", url, "", nil, payload, notify.Options{MaxAttempts: 3})
+			if !res.Success {
+				w.Log.Error("escalation webhook delivery failed", "url", url, "err", res.Error, "level", level)
+			}
 			pid := policyID
 			w.Store.LogEscalationFire(ctx, projectID, &issueID, &pid, level, url, res.Success)
 		}
@@ -129,6 +158,9 @@ func (w *Worker) fireEscalationLevel(ctx context.Context, projectID, issueID, po
 			}
 			cfg := map[string]any{"to": em}
 			res, _ := notify.DeliverWithRetry(ctx, "email", "", "", cfg, payload, notify.Options{MaxAttempts: 2})
+			if !res.Success {
+				w.Log.Error("escalation email delivery failed", "to", em, "err", res.Error, "level", level)
+			}
 			pid := policyID
 			w.Store.LogEscalationFire(ctx, projectID, &issueID, &pid, level, "email:"+em, res.Success)
 		}
@@ -149,9 +181,22 @@ func (w *Worker) handle(ctx context.Context, job queue.Job) error {
 		if err := json.Unmarshal(job.Payload, &p); err != nil {
 			return err
 		}
-		pid, _ := uuid.Parse(p.ProjectID)
-		iid, _ := uuid.Parse(p.IssueID)
-		pol, _ := uuid.Parse(p.PolicyID)
+		// Validate required fields
+		if p.ProjectID == "" || p.IssueID == "" || p.PolicyID == "" {
+			return fmt.Errorf("notify_escalation: missing required fields (project_id, issue_id, policy_id)")
+		}
+		pid, err := uuid.Parse(p.ProjectID)
+		if err != nil {
+			return fmt.Errorf("notify_escalation: invalid project_id: %w", err)
+		}
+		iid, err := uuid.Parse(p.IssueID)
+		if err != nil {
+			return fmt.Errorf("notify_escalation: invalid issue_id: %w", err)
+		}
+		pol, err := uuid.Parse(p.PolicyID)
+		if err != nil {
+			return fmt.Errorf("notify_escalation: invalid policy_id: %w", err)
+		}
 		w.fireEscalationLevel(ctx, pid, iid, pol, p.Level, p.LevelCfg, p.Payload)
 		return nil
 	case "process_event":
@@ -238,8 +283,10 @@ func (w *Worker) processEvent(ctx context.Context, id uuid.UUID, wantProject *uu
 	}
 	dec, err := decode.Envelope(raw)
 	if err != nil {
-		fail, _ := json.Marshal(map[string]string{"error": err.Error()})
-		return w.Store.FinalizeEvent(ctx, id, nil, nil, nil, nil, "failed", "", fail, json.RawMessage(`{}`), json.RawMessage(`[]`))
+		// Use a typed decode error so downstream consumers can distinguish
+		// decode failures from other processing failures.
+		errMsg, _ := json.Marshal(map[string]string{"error_type": "decode_error", "message": err.Error()})
+		return w.Store.FinalizeEvent(ctx, id, nil, nil, nil, nil, "failed", "decode_error", errMsg, json.RawMessage(`{}`), json.RawMessage(`[]`))
 	}
 
 	pipeline := ev.Pipeline
@@ -278,33 +325,51 @@ func (w *Worker) processTelemetry(ctx context.Context, ev store.Event, dec decod
 	}
 	device, err := w.Store.UpsertDevice(ctx, ev.ProjectID, dec.Identity.DeviceID, dec.Identity.Product, dec.Identity.HardwareRevision, dec.Identity.FirmwareVersion, dec.Identity.BuildID, severity)
 	if err != nil {
-		return err
+		return fmt.Errorf("upsert device: %w", err)
 	}
 	did := device.ID
-	_ = w.Store.MarkDeviceHealth(ctx, did, severity)
-	_ = w.Store.RecordFirmwareHistory(ctx, ev.ProjectID, did, dec.Identity.FirmwareVersion, dec.Identity.BuildID)
+	if err := w.Store.MarkDeviceHealth(ctx, did, severity); err != nil {
+		// Critical for health pipeline — non-critical for others
+		if pipeline == "health" {
+			return fmt.Errorf("mark device health: %w", err)
+		}
+		w.Log.Warn("mark device health", "err", err, "device", did)
+	}
+	if err := w.Store.RecordFirmwareHistory(ctx, ev.ProjectID, did, dec.Identity.FirmwareVersion, dec.Identity.BuildID); err != nil {
+		w.Log.Warn("record firmware history", "err", err, "device", did)
+	}
 	if dec.BootID != "" || dec.Identity.BootID != "" {
 		boot := dec.BootID
 		if boot == "" {
 			boot = dec.Identity.BootID
 		}
-		_ = w.Store.UpsertBootSession(ctx, ev.ProjectID, &did, boot)
+		if err := w.Store.UpsertBootSession(ctx, ev.ProjectID, &did, boot); err != nil {
+			w.Log.Warn("upsert boot session", "err", err, "device", did, "boot", boot)
+		}
 	}
 
 	eid := ev.ID
 	switch pipeline {
 	case "health":
-		_ = w.Store.InsertHealthSample(ctx, ev.ProjectID, &did, &eid, map[string]any{"identity": dec.Identity, "header": dec.Header})
+		if err := w.Store.InsertHealthSample(ctx, ev.ProjectID, &did, &eid, map[string]any{"identity": dec.Identity, "header": dec.Header}); err != nil {
+			w.Log.Warn("insert health sample", "err", err, "device", did)
+		}
 	case "log":
 		msg := dec.Assert
 		if msg == "" {
 			msg = lep.EventTypeName(dec.Header.Type)
 		}
-		_ = w.Store.InsertLogEntry(ctx, ev.ProjectID, &did, &eid, "info", msg)
+		if err := w.Store.InsertLogEntry(ctx, ev.ProjectID, &did, &eid, "info", msg); err != nil {
+			w.Log.Warn("insert log entry", "err", err, "device", did)
+		}
 	case "metric":
-		_ = w.Store.InsertMetric(ctx, ev.ProjectID, &did, &eid, "peripheral", float64(dec.Header.Sequence))
+		if err := w.Store.InsertMetric(ctx, ev.ProjectID, &did, &eid, "peripheral", float64(dec.Header.Sequence)); err != nil {
+			w.Log.Warn("insert metric", "err", err, "device", did)
+		}
 	case "boot":
-		_ = w.Store.UpsertBootSession(ctx, ev.ProjectID, &did, fmt.Sprintf("reset-%d", dec.Header.Sequence))
+		if err := w.Store.UpsertBootSession(ctx, ev.ProjectID, &did, fmt.Sprintf("reset-%d", dec.Header.Sequence)); err != nil {
+			w.Log.Warn("upsert boot session (reset)", "err", err, "device", did)
+		}
 	}
 
 	decodedJSON, _ := json.Marshal(dec)
@@ -326,14 +391,20 @@ func (w *Worker) processIssueEvent(ctx context.Context, ev store.Event, dec deco
 		return err
 	}
 	deviceID := device.ID
-	_ = w.Store.MarkDeviceHealth(ctx, deviceID, severity)
-	_ = w.Store.RecordFirmwareHistory(ctx, ev.ProjectID, deviceID, dec.Identity.FirmwareVersion, dec.Identity.BuildID)
+	if err := w.Store.MarkDeviceHealth(ctx, deviceID, severity); err != nil {
+		w.Log.Warn("mark device health", "err", err, "device", deviceID)
+	}
+	if err := w.Store.RecordFirmwareHistory(ctx, ev.ProjectID, deviceID, dec.Identity.FirmwareVersion, dec.Identity.BuildID); err != nil {
+		w.Log.Warn("record firmware history", "err", err, "device", deviceID)
+	}
 	if dec.BootID != "" || dec.Identity.BootID != "" {
 		boot := dec.BootID
 		if boot == "" {
 			boot = dec.Identity.BootID
 		}
-		_ = w.Store.UpsertBootSession(ctx, ev.ProjectID, &deviceID, boot)
+		if err := w.Store.UpsertBootSession(ctx, ev.ProjectID, &deviceID, boot); err != nil {
+			w.Log.Warn("upsert boot session (issue)", "err", err, "device", deviceID)
+		}
 	}
 
 	var releaseID *uuid.UUID
@@ -393,7 +464,9 @@ func (w *Worker) processIssueEvent(ctx context.Context, ev store.Event, dec deco
 	if err := w.Store.FinalizeEvent(ctx, ev.ID, &deviceID, releaseID, artifactID, &issueID, "ready", fp, decodedJSON, analysisJSON, framesJSON); err != nil {
 		return err
 	}
-	_ = w.Store.SetEventAnalyzerVersion(ctx, ev.ID, analysis.AnalyzerVersion, SymbolizerVersion)
+	if err := w.Store.SetEventAnalyzerVersion(ctx, ev.ID, analysis.AnalyzerVersion, SymbolizerVersion); err != nil {
+		w.Log.Warn("set event analyzer version", "err", err, "event", ev.ID)
+	}
 
 	if issue.IsNew || issue.IsRegression {
 		kind := "new_issue"
@@ -404,12 +477,14 @@ func (w *Worker) processIssueEvent(ctx context.Context, ev store.Event, dec deco
 		if issue.IsRegression {
 			dedupe = fmt.Sprintf("reg-%d", issue.RegressionCount)
 		}
-		_ = w.Store.EnqueueJob(ctx, "notify_issue", map[string]string{
+		if err := w.Store.EnqueueJob(ctx, "notify_issue", map[string]string{
 			"project_id": ev.ProjectID.String(),
 			"issue_id":   issueID.String(),
 			"kind":       kind,
 			"dedupe":     dedupe,
-		})
+		}); err != nil {
+			w.Log.Warn("enqueue notify issue", "err", err, "issue", issueID)
+		}
 	}
 	return nil
 }
@@ -471,10 +546,16 @@ func (w *Worker) notifyIssue(ctx context.Context, projectID, issueID uuid.UUID, 
 				Template:    tmpl,
 			})
 			rid := rule.ID
-			_ = w.Store.RecordWebhook(ctx, projectID, &rid, kind, target, last.StatusCode, last.Success, last.Body+last.Error, payload)
-			_ = w.Store.RecordNotifyDelivery(ctx, projectID, channel, target, last.Success, last.StatusCode, len(history), last.Error+last.Body)
+			if err := w.Store.RecordWebhook(ctx, projectID, &rid, kind, target, last.StatusCode, last.Success, last.Body+last.Error, payload); err != nil {
+				w.Log.Warn("record webhook", "err", err, "rule", rid)
+			}
+			if err := w.Store.RecordNotifyDelivery(ctx, projectID, channel, target, last.Success, last.StatusCode, len(history), last.Error+last.Body); err != nil {
+				w.Log.Warn("record notify delivery", "err", err, "channel", channel)
+			}
 			if last.Success {
-				_ = w.Store.MarkAlertFired(ctx, rule.ID)
+				if err := w.Store.MarkAlertFired(ctx, rule.ID); err != nil {
+					w.Log.Warn("mark alert fired", "err", err, "rule", rid)
+				}
 			} else {
 				w.Store.LogAlertSkip(ctx, projectID, &issueID, &rid, kind, "error", last.Error+last.Body)
 			}
@@ -482,33 +563,14 @@ func (w *Worker) notifyIssue(ctx context.Context, projectID, issueID uuid.UUID, 
 	}
 
 	// also fan-out all enabled notification_channels for the kind via extra config
-	channels, _ := w.Store.ListChannels(ctx, projectID)
-	for _, ch := range channels {
-		if en, _ := ch["enabled"].(bool); !en {
-			continue
-		}
-		id, _ := ch["id"].(uuid.UUID)
-		if id == uuid.Nil {
-			if s, ok := ch["id"].(string); ok {
-				id, _ = uuid.Parse(s)
-			}
-		}
-		if id == uuid.Nil {
-			continue
-		}
-		kindCh, _, secret, conf, err := w.Store.GetChannel(ctx, projectID, id)
-		if err != nil {
-			continue
-		}
-		var cfg map[string]any
-		_ = json.Unmarshal(conf, &cfg)
-		res, hist := notify.DeliverWithRetry(ctx, kindCh, strCfg(cfg, "webhook_url"), secret, cfg, payload, notify.Options{
-			MaxAttempts: 4,
-			BaseDelay:   500 * time.Millisecond,
-			Template:    strCfg(cfg, "template"),
-		})
-		_ = w.Store.RecordWebhook(ctx, projectID, nil, kind, kindCh, res.StatusCode, res.Success, res.Body+res.Error, payload)
-		_ = w.Store.RecordNotifyDelivery(ctx, projectID, kindCh, strCfg(cfg, "webhook_url"), res.Success, res.StatusCode, len(hist), res.Error+res.Body)
+	var chErr error
+	if _, chErr = w.Store.ListChannels(ctx, projectID); chErr != nil {
+		w.Log.Warn("list channels failed — skipping channel fan-out", "project", projectID, "err", chErr)
+	}
+	if err != nil {
+		w.Log.Warn("list channels failed — skipping channel fan-out", "project", projectID, "err", err)
+	} else {
+		w.notifyChannelsForIssue(ctx, projectID, issueID, kind, payload)
 	}
 
 	// On-call: annotate payload and page whoever is on shift
@@ -554,12 +616,31 @@ func (w *Worker) notifyIssue(ctx context.Context, projectID, issueID uuid.UUID, 
 			if !pol.Enabled {
 				continue
 			}
+			// Validate policy ID
+			if pol.ID == uuid.Nil {
+				w.Log.Warn("skipping escalation policy with nil ID", "policy", pol.ID)
+				continue
+			}
 			var levels []map[string]any
-			_ = json.Unmarshal(pol.Levels, &levels)
+			if err := json.Unmarshal(pol.Levels, &levels); err != nil {
+				w.Log.Warn("invalid escalation policy levels JSON", "policy", pol.ID, "err", err)
+				continue
+			}
 			for li, lvl := range levels {
 				delay := 0
 				if d, ok := lvl["delay_sec"].(float64); ok {
 					delay = int(d)
+					if delay < 0 {
+						w.Log.Warn("skipping escalation level with negative delay", "policy", pol.ID, "level", li)
+						continue
+					}
+				}
+				// Validate level_cfg has at least webhooks or emails
+				if _, hasWebhooks := lvl["webhooks"]; !hasWebhooks {
+					if _, hasEmails := lvl["emails"]; !hasEmails {
+						w.Log.Warn("skipping escalation level without webhooks or emails", "policy", pol.ID, "level", li)
+						continue
+					}
 				}
 				if delay > 0 {
 					// schedule delayed escalation step
@@ -571,7 +652,9 @@ func (w *Worker) notifyIssue(ctx context.Context, projectID, issueID uuid.UUID, 
 						"level_cfg":  lvl,
 						"payload":    payload,
 					}
-					_ = w.Store.EnqueueJobDelayed(ctx, "notify_escalation", step, time.Duration(delay)*time.Second)
+					if err := w.Store.EnqueueJobDelayed(ctx, "notify_escalation", step, time.Duration(delay)*time.Second); err != nil {
+						w.Log.Warn("enqueue delayed escalation", "err", err, "delay", delay)
+					}
 					continue
 				}
 				w.fireEscalationLevel(ctx, projectID, issueID, pol.ID, li, lvl, payload)
@@ -579,6 +662,45 @@ func (w *Worker) notifyIssue(ctx context.Context, projectID, issueID uuid.UUID, 
 		}
 	}
 	return nil
+}
+
+// notifyChannelsForIssue fans out notifications to all enabled notification_channels
+// for the given issue kind. This is separated from notifyIssue to allow error handling
+// at the ListChannels call site.
+func (w *Worker) notifyChannelsForIssue(ctx context.Context, projectID, issueID uuid.UUID, kind string, payload map[string]any) {
+	channels, _ := w.Store.ListChannels(ctx, projectID)
+	for _, ch := range channels {
+		if en, _ := ch["enabled"].(bool); !en {
+			continue
+		}
+		id, _ := ch["id"].(uuid.UUID)
+		if id == uuid.Nil {
+			if s, ok := ch["id"].(string); ok {
+				id, _ = uuid.Parse(s)
+			}
+		}
+		if id == uuid.Nil {
+			continue
+		}
+		kindCh, _, secret, conf, err := w.Store.GetChannel(ctx, projectID, id)
+		if err != nil {
+			w.Log.Warn("get channel failed", "channel", id, "err", err)
+			continue
+		}
+		var cfg map[string]any
+		_ = json.Unmarshal(conf, &cfg)
+		res, hist := notify.DeliverWithRetry(ctx, kindCh, strCfg(cfg, "webhook_url"), secret, cfg, payload, notify.Options{
+			MaxAttempts: 4,
+			BaseDelay:   500 * time.Millisecond,
+			Template:    strCfg(cfg, "template"),
+		})
+		if err := w.Store.RecordWebhook(ctx, projectID, nil, kind, kindCh, res.StatusCode, res.Success, res.Body+res.Error, payload); err != nil {
+			w.Log.Warn("record webhook (channel)", "err", err, "channel", kindCh)
+		}
+		if err := w.Store.RecordNotifyDelivery(ctx, projectID, kindCh, strCfg(cfg, "webhook_url"), res.Success, res.StatusCode, len(hist), res.Error+res.Body); err != nil {
+			w.Log.Warn("record notify delivery (channel)", "err", err, "channel", kindCh)
+		}
+	}
 }
 
 func strCfg(m map[string]any, k string) string {

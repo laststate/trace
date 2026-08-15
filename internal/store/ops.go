@@ -165,6 +165,66 @@ func (s *Store) RevokeAllSessions(ctx context.Context, userID uuid.UUID) error {
 	return err
 }
 
+// RevokeAllOtherSessions revokes every active session for a user EXCEPT the
+// supplied currentSessionID. Used by /api/me/sessions/revoke-others.
+func (s *Store) RevokeAllOtherSessions(ctx context.Context, userID, currentSessionID uuid.UUID) error {
+	_, err := s.Pool.Exec(ctx, `UPDATE sessions SET revoked_at=now() WHERE user_id=$1 AND id<>$2 AND revoked_at IS NULL`, userID, currentSessionID)
+	return err
+}
+
+// SessionInfo is one row of the /api/me/sessions listing.
+type SessionInfo struct {
+	ID         uuid.UUID  `json:"id"`
+	Prefix     string     `json:"prefix"`
+	IP         string     `json:"ip,omitempty"`
+	UserAgent  string     `json:"user_agent,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	ExpiresAt  time.Time  `json:"expires_at"`
+	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
+}
+
+// ListSessions returns active and recent sessions for a user. Active first.
+func (s *Store) ListSessions(ctx context.Context, userID uuid.UUID, limit int) ([]SessionInfo, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.Pool.Query(ctx, `
+SELECT id, prefix, COALESCE(host(ip),''), COALESCE(user_agent,''), created_at, last_used_at, expires_at, revoked_at
+FROM sessions WHERE user_id=$1
+ORDER BY revoked_at NULLS FIRST, last_used_at DESC NULLS LAST
+LIMIT $2`, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SessionInfo
+	for rows.Next() {
+		var si SessionInfo
+		var ip, ua string
+		var lastUsed, revoked *time.Time
+		if err := rows.Scan(&si.ID, &si.Prefix, &ip, &ua, &si.CreatedAt, &lastUsed, &si.ExpiresAt, &revoked); err != nil {
+			return nil, err
+		}
+		si.IP = ip
+		si.UserAgent = ua
+		si.LastUsedAt = lastUsed
+		si.RevokedAt = revoked
+		out = append(out, si)
+	}
+	return out, rows.Err()
+}
+
+// CreateOrgToken persists a new API token scoped to an organization (no project
+// required). Returns the public prefix and id used for revocation.
+func (s *Store) CreateOrgToken(ctx context.Context, orgID uuid.UUID, name, prefix string, hash []byte, scopes []string) (uuid.UUID, error) {
+	var id uuid.UUID
+	err := s.Pool.QueryRow(ctx, `
+INSERT INTO tokens(organization_id, name, prefix, hash, scopes)
+VALUES ($1,$2,$3,$4,$5) RETURNING id`, orgID, name, prefix, hash, scopes).Scan(&id)
+	return id, err
+}
+
 // FTSSearch uses postgres full-text search when available.
 func (s *Store) FTSSearch(ctx context.Context, projectID uuid.UUID, q string, limit int) (map[string]any, error) {
 	if limit <= 0 {

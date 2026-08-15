@@ -11,3 +11,5 @@ web/test-results/
 web/playwright-report/
 web/preview-shots/
 *.log
+/# migrations live under internal/db/migrations/ (embedded via go:embed)
+/migrations/

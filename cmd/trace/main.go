@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -30,7 +31,63 @@ func main() {
 	slog.SetDefault(log)
 
 	cfg := config.Load()
-	if err := cfg.ValidateProduction(); err != nil {
+
+	// Generate random admin password if empty and Bootstrap is enabled.
+	// This ensures the admin user always has a strong password.
+	if cfg.Bootstrap && cfg.AdminPassword == "" {
+		cfg.AdminPassword = generateRandomPassword(24)
+		log.Info("generated random admin password", "length", len(cfg.AdminPassword))
+	}
+
+	// Mock mode: preview the UI with fake data, no DB/S3/queue required.
+	// Set TRACE_MOCK=true to enable.
+	if os.Getenv("TRACE_MOCK") == "true" {
+		log.Info("starting in MOCK mode — UI preview with fake data (no DB/S3/queue)")
+		cfg.OpenUI = true
+		cfg.AllowPublicRegister = true
+		cfg.Mode = "api"
+
+		webDir := envOr("TRACE_WEB_DIR", "web/dist")
+		msrv := api.NewMockServer(webDir, log)
+		httpSrv := &http.Server{
+			Addr:              cfg.Listen,
+			Handler:           msrv.Handler(),
+			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       30 * time.Second,
+			WriteTimeout:      30 * time.Second,
+			IdleTimeout:       60 * time.Second,
+			MaxHeaderBytes:    cfg.MaxHeaderBytes,
+		}
+
+		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer cancel()
+
+		go func() {
+			log.Info("mock server listening",
+				"addr", cfg.Listen,
+				"open_ui", true,
+				"mode", "mock",
+			)
+			if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Error("http", "err", err)
+				cancel()
+			}
+		}()
+
+		<-ctx.Done()
+		shutdownTimeout := time.Duration(cfg.ShutdownTimeoutSec) * time.Second
+		shutdownCtx, c := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer c()
+		_ = httpSrv.Shutdown(shutdownCtx)
+		return
+	}
+
+	// Production path
+	warnings, err := cfg.ValidateProduction()
+	for _, w := range warnings {
+		log.Warn("config validation warning", "field", w.Field, "msg", w.Msg)
+	}
+	if err != nil {
 		log.Error("config", "err", err)
 		os.Exit(1)
 	}
@@ -98,6 +155,11 @@ func main() {
 	if qerr != nil {
 		log.Error("queue", "err", qerr)
 		os.Exit(1)
+	}
+	// Warn if using in-process queue with separate API/worker processes.
+	// In-memory queues are only suitable for single-process deployments.
+	if (qName == "memory" || qName == "nats-memory-sim") && cfg.Mode != "all" {
+		log.Warn("in-memory queue in use with separate API/worker mode — jobs will not be shared between processes", "queue", qName)
 	}
 	_ = strings.TrimSpace(qName)
 
@@ -182,7 +244,8 @@ func main() {
 	}()
 
 	<-ctx.Done()
-	shutdownCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownTimeout := time.Duration(cfg.ShutdownTimeoutSec) * time.Second
+	shutdownCtx, c := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer c()
 	_ = httpSrv.Shutdown(shutdownCtx)
 }
@@ -197,3 +260,18 @@ func envOr(k, def string) string {
 type emptyFS struct{}
 
 func (emptyFS) Open(name string) (fs.File, error) { return nil, fs.ErrNotExist }
+
+// generateRandomPassword creates a cryptographically secure random password
+// using URL-safe base64 characters (alphanumeric + _-).
+func generateRandomPassword(length int) string {
+	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+	buf := make([]byte, length)
+	if _, err := rand.Read(buf); err != nil {
+		// Fallback: should never happen in practice
+		return "generated-password-fallback"
+	}
+	for i := range buf {
+		buf[i] = chars[int(buf[i])%len(chars)]
+	}
+	return string(buf)
+}
