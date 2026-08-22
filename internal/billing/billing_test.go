@@ -13,16 +13,16 @@ import (
 )
 
 type fakeResolver struct {
-	plans  map[string]store.PlanLimit
-	subs   map[uuid.UUID]store.OrgSubscription
-	usage  map[uuid.UUID]map[string]int64
+	plans map[string]store.PlanLimit
+	subs  map[uuid.UUID]store.OrgSubscription
+	usage map[uuid.UUID]map[string]int64
 }
 
 func newFakeResolver() *fakeResolver {
 	return &fakeResolver{
 		plans: map[string]store.PlanLimit{
-			billing.TierFree: {Tier: billing.TierFree, EventsPerMonth: 10000, ProjectsMax: 1, MembersMax: 3},
-			billing.TierPro:  {Tier: billing.TierPro, EventsPerMonth: 1000000, ProjectsMax: 10, MembersMax: 15},
+			billing.TierFree:       {Tier: billing.TierFree, EventsPerMonth: 10000, ProjectsMax: 1, MembersMax: 3},
+			billing.TierPro:        {Tier: billing.TierPro, EventsPerMonth: 1000000, ProjectsMax: 10, MembersMax: 15},
 			billing.TierEnterprise: {Tier: billing.TierEnterprise, EventsPerMonth: 0, ProjectsMax: 0, MembersMax: 0},
 		},
 		subs:  map[uuid.UUID]store.OrgSubscription{},
@@ -257,7 +257,7 @@ func TestApplyEntitlements_AppliesNewState(t *testing.T) {
 		subs: map[uuid.UUID]store.OrgSubscription{
 			uuid.MustParse("00000000-0000-0000-0000-000000000001"): {
 				OrganizationID: uuid.MustParse("00000000-0000-0000-0000-000000000001"),
-				PlanTier: billing.TierFree, SubscriptionStatus: billing.StatusActive,
+				PlanTier:       billing.TierFree, SubscriptionStatus: billing.StatusActive,
 			},
 		},
 		events: map[string]bool{},

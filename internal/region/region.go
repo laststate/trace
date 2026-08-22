@@ -1,6 +1,6 @@
-// Package region provides multi-region support for Trace deployments.
-// This is a stub implementation that documents the architecture for active-active
-// cross-region deployments with geo-sharding and failover.
+// Package region contains the control-plane model for multi-region Trace
+// deployments. Replication is deliberately injected: this package must never
+// report synthetic replication success.
 package region
 
 import (
@@ -12,42 +12,49 @@ import (
 
 // Region represents a geographic region in a multi-region deployment.
 type Region struct {
-	ID         string    `json:"id"`
-	Name       string    `json:"name"`
-	Primary    bool      `json:"primary"`
-	Endpoint   string    `json:"endpoint"`
-	Active     bool      `json:"active"`
-	LastSync   time.Time `json:"last_sync"`
+	ID             string        `json:"id"`
+	Name           string        `json:"name"`
+	Primary        bool          `json:"primary"`
+	Endpoint       string        `json:"endpoint"`
+	Active         bool          `json:"active"`
+	LastSync       time.Time     `json:"last_sync"`
 	ReplicationLag time.Duration `json:"replication_lag"`
 }
 
 // ReplicationStatus represents the status of cross-region replication.
 type ReplicationStatus struct {
-	SourceRegion   string        `json:"source_region"`
-	DestRegion     string        `json:"dest_region"`
-	LastSyncAt     time.Time     `json:"last_sync_at"`
-	Lag            time.Duration `json:"lag"`
-	Status         string        `json:"status"` // "syncing", "synced", "error"
-	EventsReplicated int         `json:"events_replicated"`
+	SourceRegion     string        `json:"source_region"`
+	DestRegion       string        `json:"dest_region"`
+	LastSyncAt       time.Time     `json:"last_sync_at"`
+	Lag              time.Duration `json:"lag"`
+	Status           string        `json:"status"` // "syncing", "synced", "error"
+	EventsReplicated int           `json:"events_replicated"`
 }
 
 // FailoverStatus represents the status of a region failover.
 type FailoverStatus struct {
-	Region       string    `json:"region"`
-	IsPrimary    bool      `json:"is_primary"`
-	LastFailover time.Time `json:"last_failover"`
-	Reason       string    `json:"reason"`
+	Region       string        `json:"region"`
+	IsPrimary    bool          `json:"is_primary"`
+	LastFailover time.Time     `json:"last_failover"`
+	Reason       string        `json:"reason"`
 	RecoveryTime time.Duration `json:"recovery_time"`
 }
 
 // Manager manages multi-region state and replication.
 type Manager struct {
-	mu           sync.RWMutex
-	regions      map[string]*Region
-	status       map[string]*ReplicationStatus
-	failovers    map[string]*FailoverStatus
+	mu            sync.RWMutex
+	regions       map[string]*Region
+	status        map[string]*ReplicationStatus
+	failovers     map[string]*FailoverStatus
 	primaryRegion string
-	heartbeat   time.Duration
+	heartbeat     time.Duration
+	replicator    Replicator
+}
+
+// Replicator is the storage-specific cross-region replication boundary.
+// Implementations must return measured counts, lag, and timestamps.
+type Replicator interface {
+	Sync(ctx context.Context, source, dest string) (ReplicationStatus, error)
 }
 
 // NewManager creates a new multi-region manager.
@@ -65,6 +72,13 @@ func NewManager(primaryRegion string, regions []*Region) *Manager {
 		r.Primary = r.ID == primaryRegion
 	}
 	return m
+}
+
+// SetReplicator configures the real replication implementation.
+func (m *Manager) SetReplicator(replicator Replicator) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.replicator = replicator
 }
 
 // GetRegion returns the region with the given ID.
@@ -160,7 +174,7 @@ func (m *Manager) Heartbeat(regionID string) {
 	}
 }
 
-// SyncRegion simulates syncing a region's data.
+// SyncRegion runs the configured replication implementation.
 func (m *Manager) SyncRegion(ctx context.Context, source, dest string) error {
 	m.mu.RLock()
 	src, ok := m.regions[source]
@@ -175,18 +189,28 @@ func (m *Manager) SyncRegion(ctx context.Context, source, dest string) error {
 	}
 	m.mu.RUnlock()
 
-	// Simulate replication
-	m.UpdateReplicationStatus(source, dest, &ReplicationStatus{
-		SourceRegion:   source,
-		DestRegion:     dest,
-		LastSyncAt:     time.Now(),
-		Lag:            time.Millisecond * 100,
-		Status:         "synced",
-		EventsReplicated: 1000,
-	})
-
-	src.LastSync = time.Now()
-	destR.LastSync = time.Now()
+	m.mu.RLock()
+	replicator := m.replicator
+	m.mu.RUnlock()
+	if replicator == nil {
+		return fmt.Errorf("multi-region replication is not configured")
+	}
+	status, err := replicator.Sync(ctx, source, dest)
+	if err != nil {
+		return err
+	}
+	if status.SourceRegion != source || status.DestRegion != dest || status.Status == "" {
+		return fmt.Errorf("replicator returned invalid status for %s:%s", source, dest)
+	}
+	m.UpdateReplicationStatus(source, dest, &status)
+	now := status.LastSyncAt
+	if now.IsZero() {
+		now = time.Now()
+	}
+	m.mu.Lock()
+	src.LastSync = now
+	destR.LastSync = now
+	m.mu.Unlock()
 
 	return nil
 }

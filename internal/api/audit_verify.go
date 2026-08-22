@@ -15,10 +15,11 @@ import (
 // integrity checks. Restricted to admin role.
 //
 // Query params:
-//   from  RFC3339 timestamp (inclusive). Optional.
-//   to    RFC3339 timestamp (inclusive). Optional.
-//   limit Max rows to scan (1..100k). Default 10000.
-//   org   UUID. When set, restricts the window to a single organization.
+//
+//	from  RFC3339 timestamp (inclusive). Optional.
+//	to    RFC3339 timestamp (inclusive). Optional.
+//	limit Max rows to scan (1..100k). Default 10000.
+//	org   UUID. When set, restricts the window to a single organization.
 //
 // Response:
 //

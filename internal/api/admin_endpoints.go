@@ -41,8 +41,9 @@ func (s *Server) adminBillingSecrets() [][]byte {
 //
 // URL: POST /v1/admin/organizations/{id}/entitlements
 // Headers:
-//   X-Billing-Timestamp: unix epoch seconds
-//   X-Billing-Signature: hex(hmac_sha256(secret, ts + "\n" + body))
+//
+//	X-Billing-Timestamp: unix epoch seconds
+//	X-Billing-Signature: hex(hmac_sha256(secret, ts + "\n" + body))
 //
 // The signing secret is configured via TRACE_BILLING_HMAC_SECRET.
 func (s *Server) adminApplyEntitlements(w http.ResponseWriter, r *http.Request) {
@@ -124,12 +125,12 @@ func (s *Server) adminListEntitlements(w http.ResponseWriter, r *http.Request) {
 		history = []store.PlanHistoryEntry{}
 	}
 	writeJSON(w, 200, map[string]any{
-		"organization_id":        sub.OrganizationID,
-		"plan_tier":              sub.PlanTier,
-		"subscription_status":    sub.SubscriptionStatus,
-		"grace_period_ends_at":   sub.GracePeriodEndsAt,
-		"billing_customer_ref":   sub.BillingCustomerRef,
+		"organization_id":          sub.OrganizationID,
+		"plan_tier":                sub.PlanTier,
+		"subscription_status":      sub.SubscriptionStatus,
+		"grace_period_ends_at":     sub.GracePeriodEndsAt,
+		"billing_customer_ref":     sub.BillingCustomerRef,
 		"billing_subscription_ref": sub.BillingSubscriptionRef,
-		"plan_history":           history,
+		"plan_history":             history,
 	})
 }

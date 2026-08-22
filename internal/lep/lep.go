@@ -1,4 +1,5 @@
-// Package lep is a minimal LEP v1 codec (aligned with laststate/protocol).
+// Package lep is a minimal LEP codec (aligned with laststate/protocol).
+// Encoders emit the current wire version (2); decoders accept v1 and v2.
 package lep
 
 import (
@@ -12,6 +13,9 @@ const (
 	MaxEnvelopeSize = 4 << 20
 	Magic           = "LSTP"
 	Version1        = 1
+	Version2        = 2
+	MinVersion      = Version1
+	CurrentVersion  = Version2
 
 	FlagAuthenticated uint8 = 1 << 0
 	FlagEncrypted     uint8 = 1 << 1
@@ -111,7 +115,7 @@ func Validate(data []byte) (Header, error) {
 		Sequence: binary.LittleEndian.Uint32(data[8:12]), EventID: binary.LittleEndian.Uint32(data[12:16]),
 		PayloadLength: binary.LittleEndian.Uint32(data[16:20]),
 	}
-	if h.Version != Version1 {
+	if h.Version < MinVersion || h.Version > CurrentVersion {
 		return h, &ValidationError{Kind: ErrorUnsupported, Field: "version", Reason: fmt.Sprintf("%d", h.Version)}
 	}
 	if h.Flags&^KnownFlags != 0 {
@@ -192,10 +196,10 @@ func ParseTLVs(payload []byte) ([]TLV, error) {
 
 func Encode(h Header, payload []byte) ([]byte, error) {
 	if h.Version == 0 {
-		h.Version = Version1
+		h.Version = CurrentVersion
 	}
-	if h.Version != Version1 {
-		return nil, &ValidationError{Kind: ErrorUnsupported, Field: "version", Reason: "not 1"}
+	if h.Version < MinVersion || h.Version > CurrentVersion {
+		return nil, &ValidationError{Kind: ErrorUnsupported, Field: "version", Reason: fmt.Sprintf("%d", h.Version)}
 	}
 	if h.Flags&^FlagTruncated != 0 {
 		return nil, &ValidationError{Kind: ErrorUnsupported, Field: "flags", Reason: "plain encode only allows TRUNCATED"}

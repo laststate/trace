@@ -47,6 +47,7 @@ services:
     environment:
       TRACE_LISTEN: ":8080"
       TRACE_PUBLIC_URL: "http://localhost:8080"
+      # NOTE: sslmode=disable is insecure for production. Use sslmode=verify-full with proper TLS in production.
       TRACE_DATABASE_URL: "postgres://trace:trace@db:5432/trace?sslmode=disable"
       TRACE_OBJECT_DIR: "/data/objects"
       TRACE_WEB_DIR: "/app/web/dist"
@@ -78,6 +79,7 @@ services:
   trace-worker:
     build: .
     environment:
+      # NOTE: sslmode=disable is insecure for production. Use sslmode=verify-full with proper TLS in production.
       TRACE_DATABASE_URL: "postgres://trace:trace@db:5432/trace?sslmode=disable"
       TRACE_OBJECT_DIR: "/data/objects"
       TRACE_MODE: "worker"

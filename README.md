@@ -21,6 +21,34 @@ Bootstrap credentials (written once, never fully logged):
 
 UI APIs require authentication by default (`TRACE_OPEN_UI=false`).
 
+## Deployment modes: local vs enterprise
+
+`TRACE_DEPLOYMENT` selects how the server behaves:
+
+| Mode | Who runs it | Auth | Quotas | Billing / paywall |
+|------|-------------|------|--------|-------------------|
+| `local` | You (self-hosted) | Not required | Off | Hidden ("everything unlocked") |
+| `enterprise` | LastState (managed SaaS) | Required | Enforced | Active (tiers, subscribe) |
+
+Default is `enterprise` (secure). To self-host with everything unlocked:
+
+```bash
+# Linux / macOS
+TRACE_DEPLOYMENT=local go run ./cmd/trace
+
+# Windows
+set TRACE_DEPLOYMENT=local && go run .\cmd\trace
+```
+
+Local mode:
+- Bypasses mandatory auth on all UI routes (`requireUI` / `requireAuth` pass through)
+- Disables ingest quotas (`quotaMiddleware` is skipped)
+- Forces `TRACE_OPEN_UI=true` and `TRACE_ALLOW_PUBLIC_REGISTER=true`
+- Billing endpoints return a single "everything unlocked" tier and the UI hides the paywall / subscription prompts
+- The active org is resolved from the default project, so usage/billing pages work without logging in
+
+Enterprise mode keeps the current behavior: auth required, quotas enforced, billing catalog + paywall shown. Billing payments are served by the proprietary `laststate/billing` service (HMAC admin API); `GET /v1/billing/*` and `GET /v1/usage` are wired in-repo and deployment-aware.
+
 ## Architecture
 
 | Mode | Role |
@@ -48,7 +76,7 @@ Every response includes `X-Trace-ID` / `X-Span-ID`.
 - `X-Forwarded-For` only from `TRACE_TRUSTED_PROXIES`
 - Channel/alert secrets encrypted when `TRACE_SECRETS_KEY` is set
 
-See [docs/SECURITY.md](docs/SECURITY.md).
+See [SECURITY.md](SECURITY.md).
 
 ## Pipelines
 

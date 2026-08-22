@@ -31,6 +31,13 @@ type Config struct {
 	// Used by ValidateProduction to warn about potential misconfiguration.
 	modeWasCorrected bool
 
+	// Deployment is the deployment mode: "local" (self-hosted, everything
+	// unlocked — no mandatory auth, no quotas, no paywall) or "enterprise"
+	// (managed LastState SaaS — auth required, quotas, billing/paywall).
+	// TRACE_DEPLOYMENT (default "enterprise"). "local" forces OpenUI and
+	// AllowPublicRegister on.
+	Deployment string
+
 	// HTTP hardening
 	ReadTimeout     time.Duration
 	WriteTimeout    time.Duration
@@ -78,6 +85,45 @@ type Config struct {
 	CookieSecure        bool   // TRACE_COOKIE_SECURE (default true when PublicURL is https)
 	ShutdownTimeoutSec  int    // TRACE_SHUTDOWN_TIMEOUT_SEC (default 10)
 	AppVersion          string
+
+	// --- Feature flags ---
+
+	// MockMode enables mock data mode (no DB required). TRACE_MOCK=true
+	MockMode bool
+
+	// Chaos engineering
+	ChaosEnabled bool   // CHAOS_ENABLED
+	ChaosAdapter string // CHAOS_ADAPTER
+	ChaosTimeout int    // CHAOS_TIMEOUT_SEC
+
+	// Public crash API
+	PublicCrashAPI     bool // PUBLIC_CRASH_API
+	PublicAPIRateLimit int  // PUBLIC_API_RATE_LIMIT
+
+	// Soundboard
+	SoundboardEnabled bool    // SOUNDBOARD_ENABLED
+	SoundboardVolume  float64 // SOUNDBOARD_VOLUME
+
+	// Device DNA
+	DNADetectionThreshold float64 // DNA_DETECTION_THRESHOLD
+
+	// Fleet health recalc interval
+	FleetHealthRecalcInterval int // FLEET_HEALTH_RECALC_INTERVAL_MIN
+
+	// Postmortem AI
+	PostmortemAPIKey  string // TRACE_POSTMORTEM_API_KEY
+	PostmortemMaxFree int    // TRACE_POSTMORTEM_MAX_FREE
+
+	// Crash-to-PR
+	GitHubToken  string // TRACE_GITHUB_TOKEN
+	GitHubRepo   string // TRACE_GITHUB_REPO
+	GitHubBranch string // TRACE_GITHUB_DEFAULT_BRANCH
+
+	// Anomaly detection (server-side backup)
+	AnomalyEnabled bool // ANOMALY_ENABLED
+
+	// Memorial wall
+	MemorialEnabled bool // MEMORIAL_ENABLED
 }
 
 func Load() Config {
@@ -97,6 +143,7 @@ func Load() Config {
 		AdminPassword:   env("TRACE_ADMIN_PASSWORD", ""), // empty = generate random; never default to "admin"
 		OpenUI:          env("TRACE_OPEN_UI", "false") == "true",
 		Mode:            strings.ToLower(env("TRACE_MODE", "all")),
+		Deployment:      strings.ToLower(env("TRACE_DEPLOYMENT", "enterprise")),
 
 		ReadTimeout:     time.Duration(envInt64("TRACE_HTTP_READ_TIMEOUT_SEC", 30)) * time.Second,
 		WriteTimeout:    time.Duration(envInt64("TRACE_HTTP_WRITE_TIMEOUT_SEC", 60)) * time.Second,
@@ -137,6 +184,25 @@ func Load() Config {
 		SecretsKey:          env("TRACE_SECRETS_KEY", ""),
 		ShutdownTimeoutSec:  int(envInt64("TRACE_SHUTDOWN_TIMEOUT_SEC", 10)),
 		AppVersion:          env("TRACE_VERSION", "0.8.0"),
+
+		// Feature flags
+		MockMode:                  env("TRACE_MOCK", "false") == "true",
+		ChaosEnabled:              env("CHAOS_ENABLED", "false") == "true",
+		ChaosAdapter:              env("CHAOS_ADAPTER", "serial"),
+		ChaosTimeout:              int(envInt64("CHAOS_TIMEOUT_SEC", 10)),
+		PublicCrashAPI:            env("PUBLIC_CRASH_API", "true") == "true",
+		PublicAPIRateLimit:        int(envInt64("PUBLIC_API_RATE_LIMIT", 100)),
+		SoundboardEnabled:         env("SOUNDBOARD_ENABLED", "true") == "true",
+		SoundboardVolume:          float64(envInt64("SOUNDBOARD_VOLUME", 50)) / 100.0,
+		DNADetectionThreshold:     float64(envInt64("DNA_DETECTION_THRESHOLD", 95)) / 100.0,
+		FleetHealthRecalcInterval: int(envInt64("FLEET_HEALTH_RECALC_INTERVAL_MIN", 15)),
+		PostmortemAPIKey:          env("TRACE_POSTMORTEM_API_KEY", ""),
+		PostmortemMaxFree:         int(envInt64("TRACE_POSTMORTEM_MAX_FREE", 10)),
+		GitHubToken:               env("TRACE_GITHUB_TOKEN", ""),
+		GitHubRepo:                env("TRACE_GITHUB_REPO", ""),
+		GitHubBranch:              env("TRACE_GITHUB_DEFAULT_BRANCH", "main"),
+		AnomalyEnabled:            env("ANOMALY_ENABLED", "false") == "true",
+		MemorialEnabled:           env("MEMORIAL_ENABLED", "true") == "true",
 	}
 	if c.OIDCRedirectURL == "" && c.OIDCIssuer != "" {
 		c.OIDCRedirectURL = strings.TrimRight(c.PublicURL, "/") + "/api/auth/oidc/callback"
@@ -144,6 +210,19 @@ func Load() Config {
 	if c.Mode != "all" && c.Mode != "api" && c.Mode != "worker" {
 		c.modeWasCorrected = true
 		c.Mode = "all"
+	}
+	// Deployment: only "local" and "enterprise" are valid. Anything else is
+	// silently corrected to "enterprise" (the safe default). Local mode is an
+	// opt-in escape hatch for self-hosters: everything unlocked.
+	if c.Deployment != "local" && c.Deployment != "enterprise" {
+		c.Deployment = "enterprise"
+	}
+	if c.IsLocal() {
+		// Local = self-hosted by the operator. The person running the server
+		// is implicitly trusted: no auth gate on the UI and open registration,
+		// mirroring what TRACE_MOCK does for previews.
+		c.OpenUI = true
+		c.AllowPublicRegister = true
 	}
 	// Default SMTPSecure to 'tls' only when SMTPHost is configured
 	if c.SMTPHost != "" && c.SMTPSecure == "" {
@@ -156,6 +235,14 @@ func Load() Config {
 	}
 	return c
 }
+
+// IsLocal reports whether Trace runs in self-hosted "everything unlocked"
+// deployment mode (TRACE_DEPLOYMENT=local).
+func (c Config) IsLocal() bool { return c.Deployment == "local" }
+
+// IsEnterprise reports whether Trace runs in managed SaaS mode
+// (TRACE_DEPLOYMENT=enterprise) with auth, quotas and billing enabled.
+func (c Config) IsEnterprise() bool { return c.Deployment == "enterprise" }
 
 // ValidateProduction rejects insecure production settings.
 // It returns a slice of warnings (non-fatal) and errors (fatal).
@@ -171,13 +258,13 @@ func (c Config) ValidateProduction() ([]ValidationWarning, error) {
 		return warnings, nil
 	}
 
-	if c.OpenUI {
+	if c.OpenUI && !c.IsLocal() {
 		return warnings, fmt.Errorf("TRACE_OPEN_UI must be false in production")
 	}
 	if c.AdminPassword == "admin" || c.AdminPassword == "password" {
 		return warnings, fmt.Errorf("insecure TRACE_ADMIN_PASSWORD in production")
 	}
-	if c.AllowPublicRegister {
+	if c.AllowPublicRegister && !c.IsLocal() {
 		return warnings, fmt.Errorf("TRACE_ALLOW_PUBLIC_REGISTER must be false in production")
 	}
 	if c.SAMLInsecure {

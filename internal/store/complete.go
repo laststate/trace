@@ -107,6 +107,18 @@ FROM events WHERE %s ORDER BY received_at DESC LIMIT $%d OFFSET $%d`, where, n, 
 	return out, total, err
 }
 
+// CountOrgDevices returns the total number of devices across all projects that
+// belong to the given organization.
+func (s *Store) CountOrgDevices(ctx context.Context, orgID uuid.UUID) (int64, error) {
+	var n int64
+	err := s.Pool.QueryRow(ctx, `
+SELECT COUNT(*) FROM devices d
+JOIN projects p ON p.id = d.project_id
+WHERE p.organization_id = $1`, orgID).Scan(&n)
+	return n, err
+}
+
+// ListDevicesPage returns a page of devices for a project.
 func (s *Store) ListDevicesPage(ctx context.Context, projectID uuid.UUID, opt ListOpts) ([]Device, int, error) {
 	opt.normalize()
 	where := `project_id=$1`

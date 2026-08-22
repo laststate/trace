@@ -32,7 +32,7 @@ func (s *Server) apiEventsPage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "no_project", err.Error(), false)
 		return
 	}
-	
+
 	// Ensure organization matches current session before proceeding
 	if err := s.checkOrgMatch(r, p.OrganizationID); err != nil {
 		writeErr(w, 403, "access_denied", "organization mismatch", false)

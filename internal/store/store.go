@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/google/uuid"
@@ -157,7 +158,12 @@ func (s *Store) Bootstrap(ctx context.Context) (org Org, project Project, tokenS
 		return
 	}
 	secret, prefix, hash, err := auth.Mint("lst_ingest")
-	if err != nil {
+	if custom := os.Getenv("TRACE_BOOTSTRAP_TOKEN"); custom != "" {
+		secret = custom
+		prefix = auth.PrefixOf(custom)
+		hash = auth.Hash(custom)
+		err = nil
+	} else if err != nil {
 		return
 	}
 	var tokID uuid.UUID
@@ -958,6 +964,486 @@ LIMIT $1`, limit)
 	}
 	return out, rows.Err()
 }
+
+// --- Health Scores ---
+
+type HealthScore struct {
+	ID         uuid.UUID       `json:"id"`
+	ProjectID  uuid.UUID       `json:"project_id"`
+	DeviceID   string          `json:"device_id"`
+	Score      float64         `json:"score"`
+	Status     string          `json:"status"`
+	Components json.RawMessage `json:"components"`
+	Updated    time.Time       `json:"updated_at"`
+}
+
+// ListHealthScores returns health scores for a project, ordered by score descending.
+// Maps the device_health_scores schema (overall_score/assessment/computed_at)
+// onto the API-facing HealthScore shape.
+func (s *Store) ListHealthScores(ctx context.Context, projectID uuid.UUID, limit int) ([]HealthScore, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := s.Pool.Query(ctx, `
+SELECT id, project_id, device_id::text, overall_score, assessment,
+  jsonb_build_object('crash_factor', crash_rate, 'uptime_factor', crash_free_rate,
+                     'boot_failure_factor', boot_failure_rate,
+                     'error_count', error_count, 'fatal_count', fatal_count),
+  computed_at
+FROM device_health_scores WHERE project_id=$1 ORDER BY overall_score DESC LIMIT $2`, projectID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []HealthScore
+	for rows.Next() {
+		var h HealthScore
+		if err := rows.Scan(&h.ID, &h.ProjectID, &h.DeviceID, &h.Score, &h.Status, &h.Components, &h.Updated); err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
+// UpsertHealthScore inserts or updates a device health score.
+func (s *Store) UpsertHealthScore(ctx context.Context, projectID uuid.UUID, deviceID string, score float64, status string, components json.RawMessage) (HealthScore, error) {
+	if components == nil {
+		components = json.RawMessage(`{}`)
+	}
+	var h HealthScore
+	err := s.Pool.QueryRow(ctx, `
+INSERT INTO device_health_scores(device_id, project_id, overall_score, assessment, computed_at)
+VALUES($1::uuid, $2, $3, $4, now())
+ON CONFLICT (device_id) DO UPDATE SET
+  overall_score=EXCLUDED.overall_score, assessment=EXCLUDED.assessment,
+  computed_at=now()
+RETURNING id, project_id, device_id::text, overall_score, assessment, $5::jsonb, computed_at`,
+		deviceID, projectID, score, status, components).
+		Scan(&h.ID, &h.ProjectID, &h.DeviceID, &h.Score, &h.Status, &h.Components, &h.Updated)
+	return h, err
+}
+
+// --- Device DNA ---
+
+type DeviceDNA struct {
+	ID            uuid.UUID `json:"id"`
+	ProjectID     uuid.UUID `json:"project_id"`
+	DeviceID      string    `json:"device_id"`
+	Fingerprint   string    `json:"fingerprint"`
+	MCUUID        string    `json:"mcu_uuid"`
+	BootAvg       float64   `json:"boot_avg"`
+	BootStddev    float64   `json:"boot_stddev"`
+	ClockFreqMHz  float64   `json:"clock_freq_mhz"`
+	FlashWearPct  float64   `json:"flash_wear_pct"`
+	BootloaderSig string    `json:"bootloader_sig"`
+	Updated       time.Time `json:"updated_at"`
+}
+
+// ListDeviceDNAs returns device DNA records, ordered by updated_at descending.
+func (s *Store) ListDeviceDNAs(ctx context.Context, projectID uuid.UUID, limit int) ([]DeviceDNA, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := s.Pool.Query(ctx, `
+SELECT id,project_id,device_id,fingerprint,mcu_uuid,boot_avg,boot_stddev,clock_freq_mhz,flash_wear_pct,bootloader_sig,updated_at
+FROM device_dna WHERE project_id=$1 ORDER BY updated_at DESC LIMIT $2`, projectID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DeviceDNA
+	for rows.Next() {
+		var d DeviceDNA
+		if err := rows.Scan(&d.ID, &d.ProjectID, &d.DeviceID, &d.Fingerprint, &d.MCUUID, &d.BootAvg, &d.BootStddev, &d.ClockFreqMHz, &d.FlashWearPct, &d.BootloaderSig, &d.Updated); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// UpsertDeviceDNA inserts or updates a device DNA record.
+func (s *Store) UpsertDeviceDNA(ctx context.Context, projectID uuid.UUID, deviceID, fingerprint, mcuUUID string, bootAvg, bootStddev, clockFreqMHz, flashWearPct float64, bootloaderSig string) (DeviceDNA, error) {
+	var d DeviceDNA
+	err := s.Pool.QueryRow(ctx, `
+INSERT INTO device_dna(project_id,device_id,fingerprint,mcu_uuid,boot_avg,boot_stddev,clock_freq_mhz,flash_wear_pct,bootloader_sig,updated_at)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,now())
+ON CONFLICT (project_id, device_id) DO UPDATE SET
+  fingerprint=EXCLUDED.fingerprint, mcu_uuid=EXCLUDED.mcu_uuid,
+  boot_avg=EXCLUDED.boot_avg, boot_stddev=EXCLUDED.boot_stddev,
+  clock_freq_mhz=EXCLUDED.clock_freq_mhz, flash_wear_pct=EXCLUDED.flash_wear_pct,
+  bootloader_sig=EXCLUDED.bootloader_sig, updated_at=now()
+RETURNING id,project_id,device_id,fingerprint,mcu_uuid,boot_avg,boot_stddev,clock_freq_mhz,flash_wear_pct,bootloader_sig,updated_at`,
+		projectID, deviceID, fingerprint, mcuUUID, bootAvg, bootStddev, clockFreqMHz, flashWearPct, bootloaderSig).
+		Scan(&d.ID, &d.ProjectID, &d.DeviceID, &d.Fingerprint, &d.MCUUID, &d.BootAvg, &d.BootStddev, &d.ClockFreqMHz, &d.FlashWearPct, &d.BootloaderSig, &d.Updated)
+	return d, err
+}
+
+// --- Chaos Injections ---
+
+type ChaosResult struct {
+	ID        uuid.UUID       `json:"id"`
+	DeviceID  string          `json:"device_id"`
+	Type      string          `json:"type"`
+	Status    string          `json:"status"`
+	Captured  json.RawMessage `json:"captured"`
+	Duration  time.Duration   `json:"duration"`
+	Error     string          `json:"error,omitempty"`
+	Timestamp time.Time       `json:"timestamp"`
+}
+
+// ListChaosResults returns chaos injection results, ordered by timestamp descending.
+func (s *Store) ListChaosResults(ctx context.Context, limit int) ([]ChaosResult, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := s.Pool.Query(ctx, `
+SELECT id,device_id,type,status,captured,duration,error,timestamp
+FROM chaos_injections ORDER BY timestamp DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ChaosResult
+	for rows.Next() {
+		var c ChaosResult
+		if err := rows.Scan(&c.ID, &c.DeviceID, &c.Type, &c.Status, &c.Captured, &c.Duration, &c.Error, &c.Timestamp); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// CreateChaosResult inserts a chaos injection result record.
+func (s *Store) CreateChaosResult(ctx context.Context, deviceID, injType, status string, captured json.RawMessage, duration time.Duration, err string) (ChaosResult, error) {
+	if captured == nil {
+		captured = json.RawMessage(`{}`)
+	}
+	var c ChaosResult
+	errInsert := s.Pool.QueryRow(ctx, `
+INSERT INTO chaos_injections(device_id,type,status,captured,duration,error)
+VALUES($1,$2,$3,$4,$5,$6)
+RETURNING id,device_id,type,status,captured,duration,error,timestamp`,
+		deviceID, injType, status, captured, duration, err).
+		Scan(&c.ID, &c.DeviceID, &c.Type, &c.Status, &c.Captured, &c.Duration, &c.Error, &c.Timestamp)
+	return c, errInsert
+}
+
+// --- Anomaly Events ---
+
+type AnomalyEvent struct {
+	ID           uuid.UUID `json:"id"`
+	ProjectID    uuid.UUID `json:"project_id"`
+	DeviceID     string    `json:"device_id"`
+	Metric       string    `json:"metric"`
+	Value        float64   `json:"value"`
+	ThresholdMin float64   `json:"threshold_min"`
+	ThresholdMax float64   `json:"threshold_max"`
+	Timestamp    time.Time `json:"timestamp"`
+}
+
+// ListAnomalyEvents returns anomaly events for a project, ordered by timestamp descending.
+func (s *Store) ListAnomalyEvents(ctx context.Context, projectID uuid.UUID, limit int) ([]AnomalyEvent, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := s.Pool.Query(ctx, `
+SELECT id,project_id,device_id,metric,value,threshold_min,threshold_max,timestamp
+FROM anomaly_events WHERE project_id=$1 ORDER BY timestamp DESC LIMIT $2`, projectID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AnomalyEvent
+	for rows.Next() {
+		var a AnomalyEvent
+		if err := rows.Scan(&a.ID, &a.ProjectID, &a.DeviceID, &a.Metric, &a.Value, &a.ThresholdMin, &a.ThresholdMax, &a.Timestamp); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// CreateAnomalyEvent inserts an anomaly event record.
+func (s *Store) CreateAnomalyEvent(ctx context.Context, projectID uuid.UUID, deviceID, metric string, value, thresholdMin, thresholdMax float64) (AnomalyEvent, error) {
+	var a AnomalyEvent
+	err := s.Pool.QueryRow(ctx, `
+INSERT INTO anomaly_events(project_id,device_id,metric,value,threshold_min,threshold_max,timestamp)
+VALUES($1,$2,$3,$4,$5,$6,now())
+RETURNING id,project_id,device_id,metric,value,threshold_min,threshold_max,timestamp`,
+		projectID, deviceID, metric, value, thresholdMin, thresholdMax).
+		Scan(&a.ID, &a.ProjectID, &a.DeviceID, &a.Metric, &a.Value, &a.ThresholdMin, &a.ThresholdMax, &a.Timestamp)
+	return a, err
+}
+
+// --- Postmortem Reports ---
+
+type PostmortemReport struct {
+	ID          uuid.UUID `json:"id"`
+	ProjectID   uuid.UUID `json:"project_id"`
+	IssueID     uuid.UUID `json:"issue_id"`
+	Markdown    string    `json:"markdown"`
+	Status      string    `json:"status"`
+	GeneratedAt time.Time `json:"generated_at"`
+}
+
+// ListPostmortems returns postmortem reports for a project, ordered by generated_at descending.
+func (s *Store) ListPostmortems(ctx context.Context, projectID uuid.UUID, limit int) ([]PostmortemReport, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := s.Pool.Query(ctx, `
+SELECT id,project_id,issue_id,markdown,status,generated_at
+FROM postmortem_reports WHERE project_id=$1 ORDER BY generated_at DESC LIMIT $2`, projectID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []PostmortemReport
+	for rows.Next() {
+		var p PostmortemReport
+		if err := rows.Scan(&p.ID, &p.ProjectID, &p.IssueID, &p.Markdown, &p.Status, &p.GeneratedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// CreatePostmortem inserts a postmortem report record.
+func (s *Store) CreatePostmortem(ctx context.Context, projectID, issueID uuid.UUID, markdown, status string) (PostmortemReport, error) {
+	var p PostmortemReport
+	err := s.Pool.QueryRow(ctx, `
+INSERT INTO postmortem_reports(project_id,issue_id,markdown,status,generated_at)
+VALUES($1,$2,$3,$4,now())
+RETURNING id,project_id,issue_id,markdown,status,generated_at`,
+		projectID, issueID, markdown, status).
+		Scan(&p.ID, &p.ProjectID, &p.IssueID, &p.Markdown, &p.Status, &p.GeneratedAt)
+	return p, err
+}
+
+// --- Issue Comments ---
+
+// Note: ListIssueComments and AddIssueComment are defined in phase2.go
+// Note: ListEventsByIssueInProject is defined in complete.go
+
+// --- PR Records ---
+
+type PRRecord struct {
+	ID         uuid.UUID `json:"id"`
+	ProjectID  uuid.UUID `json:"project_id"`
+	IssueID    uuid.UUID `json:"issue_id"`
+	PRURL      string    `json:"pr_url"`
+	PRNumber   int       `json:"pr_number"`
+	BranchName string    `json:"branch_name"`
+	Status     string    `json:"status"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+// ListPRRecords returns PR records for a project, ordered by created_at descending.
+func (s *Store) ListPRRecords(ctx context.Context, projectID uuid.UUID, limit int) ([]PRRecord, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := s.Pool.Query(ctx, `
+SELECT id,project_id,issue_id,pr_url,pr_number,branch_name,status,created_at
+FROM pr_records WHERE project_id=$1 ORDER BY created_at DESC LIMIT $2`, projectID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []PRRecord
+	for rows.Next() {
+		var p PRRecord
+		if err := rows.Scan(&p.ID, &p.ProjectID, &p.IssueID, &p.PRURL, &p.PRNumber, &p.BranchName, &p.Status, &p.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// CreatePRRecord inserts a PR record linking a PR to an issue.
+func (s *Store) CreatePRRecord(ctx context.Context, projectID, issueID uuid.UUID, prURL string, prNumber int, branchName, status string) (PRRecord, error) {
+	var p PRRecord
+	err := s.Pool.QueryRow(ctx, `
+INSERT INTO pr_records(project_id,issue_id,pr_url,pr_number,branch_name,status,created_at)
+VALUES($1,$2,$3,$4,$5,$6,now())
+RETURNING id,project_id,issue_id,pr_url,pr_number,branch_name,status,created_at`,
+		projectID, issueID, prURL, prNumber, branchName, status).
+		Scan(&p.ID, &p.ProjectID, &p.IssueID, &p.PRURL, &p.PRNumber, &p.BranchName, &p.Status, &p.CreatedAt)
+	return p, err
+}
+
+// --- Memorial Devices ---
+
+type MemorialDevice struct {
+	DeviceID        string    `json:"device_id"`
+	Product         string    `json:"product"`
+	FirmwareVersion string    `json:"firmware_version"`
+	BuildID         string    `json:"build_id"`
+	Status          string    `json:"status"`
+	FirstSeen       time.Time `json:"first_seen"`
+	LastSeen        time.Time `json:"last_seen"`
+	EventCount      int64     `json:"event_count"`
+	UniqueIssues    int64     `json:"unique_issues"`
+}
+
+// ListMemorialDevices returns anonymized device data for devices that have not been seen recently.
+func (s *Store) ListMemorialDevices(ctx context.Context, days int) ([]MemorialDevice, error) {
+	if days <= 0 {
+		days = 30
+	}
+	rows, err := s.Pool.Query(ctx, `
+SELECT devices.device_id, devices.product, devices.firmware_version, devices.build_id, devices.status,
+  devices.first_seen, devices.last_seen,
+  COUNT(DISTINCT e.id) AS event_count,
+  COUNT(DISTINCT e.issue_id) AS unique_issues
+FROM devices
+LEFT JOIN events e ON e.device_id = devices.id
+WHERE devices.last_seen < now() - ($1 || ' days')::interval
+GROUP BY devices.device_id, devices.product, devices.firmware_version, devices.build_id,
+  devices.status, devices.first_seen, devices.last_seen
+ORDER BY devices.last_seen ASC`, days)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []MemorialDevice
+	for rows.Next() {
+		var m MemorialDevice
+		if err := rows.Scan(&m.DeviceID, &m.Product, &m.FirmwareVersion, &m.BuildID, &m.Status, &m.FirstSeen, &m.LastSeen, &m.EventCount, &m.UniqueIssues); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// --- Crash Stats ---
+
+type CrashStat struct {
+	Architecture  string `json:"architecture"`
+	Region        string `json:"region"`
+	Severity      string `json:"severity"`
+	CrashCount    int64  `json:"crash_count"`
+	UniqueDevices int64  `json:"unique_devices"`
+}
+
+// PublicCrashStats returns aggregated crash statistics grouped by architecture, region, severity.
+func (s *Store) PublicCrashStats(ctx context.Context, days int, arch, region, severity string) ([]CrashStat, error) {
+	if days <= 0 {
+		days = 30
+	}
+	var q string
+	var args []any
+	argIdx := 1
+	q = `
+SELECT COALESCE(a.architecture,'unknown') AS architecture,
+  COALESCE(i.region,'unknown') AS region,
+  COALESCE(e.severity,'unknown') AS severity,
+  COUNT(*) AS crash_count,
+  COUNT(DISTINCT e.device_id) AS unique_devices
+FROM events e
+LEFT JOIN artifacts a ON a.id = e.artifact_id
+LEFT JOIN issues i ON i.id = e.issue_id
+WHERE e.received_at > now() - ($1 || ' days')::interval AND e.severity IN ('fatal','error')`
+	args = append(args, days)
+	if arch != "" {
+		q += fmt.Sprintf(` AND a.architecture=$%d`, argIdx)
+		args = append(args, arch)
+		argIdx++
+	}
+	if region != "" {
+		q += fmt.Sprintf(` AND i.region=$%d`, argIdx)
+		args = append(args, region)
+		argIdx++
+	}
+	if severity != "" {
+		q += fmt.Sprintf(` AND e.severity=$%d`, argIdx)
+		args = append(args, severity)
+		argIdx++
+	}
+	q += ` GROUP BY a.architecture, i.region, e.severity ORDER BY crash_count DESC`
+
+	rows, err := s.Pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []CrashStat
+	for rows.Next() {
+		var c CrashStat
+		if err := rows.Scan(&c.Architecture, &c.Region, &c.Severity, &c.CrashCount, &c.UniqueDevices); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// --- Feature Flags ---
+
+type FeatureFlag struct {
+	Name    string `json:"name"`
+	Enabled bool   `json:"enabled"`
+}
+
+// GetFeatureFlag returns a feature flag by name.
+func (s *Store) GetFeatureFlag(ctx context.Context, flagName string) (FeatureFlag, error) {
+	var f FeatureFlag
+	err := s.Pool.QueryRow(ctx, `SELECT name, enabled FROM feature_flags WHERE name=$1`, flagName).
+		Scan(&f.Name, &f.Enabled)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return FeatureFlag{}, ErrNotFound
+	}
+	return f, err
+}
+
+// SetFeatureFlag inserts or updates a feature flag.
+func (s *Store) SetFeatureFlag(ctx context.Context, flagName string, enabled bool) (FeatureFlag, error) {
+	var f FeatureFlag
+	err := s.Pool.QueryRow(ctx, `
+INSERT INTO feature_flags(name,enabled) VALUES($1,$2)
+ON CONFLICT (name) DO UPDATE SET enabled=EXCLUDED.enabled
+RETURNING name, enabled`, flagName, enabled).
+		Scan(&f.Name, &f.Enabled)
+	return f, err
+}
+
+// --- Postmortem Quota ---
+
+type PostmortemQuota struct {
+	Date  string `json:"date"`
+	Count int64  `json:"count"`
+}
+
+// IncrementPostmortemQuota atomically increments the daily postmortem quota counter.
+func (s *Store) IncrementPostmortemQuota(ctx context.Context, date string) (PostmortemQuota, error) {
+	var q PostmortemQuota
+	err := s.Pool.QueryRow(ctx, `
+INSERT INTO postmortem_quota(date,count) VALUES($1,1)
+ON CONFLICT (date) DO UPDATE SET count=postmortem_quota.count+1
+RETURNING date, count`, date).
+		Scan(&q.Date, &q.Count)
+	return q, err
+}
+
+// GetPostmortemQuota returns the current quota count for a date.
+func (s *Store) GetPostmortemQuota(ctx context.Context, date string) (PostmortemQuota, error) {
+	var q PostmortemQuota
+	err := s.Pool.QueryRow(ctx, `SELECT date, count FROM postmortem_quota WHERE date=$1`, date).
+		Scan(&q.Date, &q.Count)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PostmortemQuota{Date: date, Count: 0}, nil
+	}
+	return q, err
+}
+
+// --- Global Search ---
 
 func (s *Store) GlobalSearch(ctx context.Context, projectID uuid.UUID, q string, limit int) (map[string]any, error) {
 	if limit <= 0 {

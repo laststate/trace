@@ -37,9 +37,9 @@ func Overview() map[string]any {
 			"err":  baseInt(count*3/100, count*7/100),
 		}
 		exceptionHourly[i] = map[string]any{
-			"hour":        ts,
-			"handled":     baseInt(count*60/100, count*75/100),
-			"unhandled":   baseInt(count*5/100, count*12/100),
+			"hour":      ts,
+			"handled":   baseInt(count*60/100, count*75/100),
+			"unhandled": baseInt(count*5/100, count*12/100),
 		}
 	}
 
@@ -120,26 +120,26 @@ func Overview() map[string]any {
 	seedAlerts()
 
 	return map[string]any{
-		"project":            map[string]any{"name": "Fleet Alpha", "slug": "fleet-alpha"},
-		"open_issues":        18,
-		"resolved_issues":    342,
-		"events_total":       7409,
-		"events_today":       612,
-		"fatal_open":         7,
-		"devices":            156,
-		"unhealthy_devices":  12,
-		"regressions":        3,
-		"events_hourly":      eventsHourly,
-		"events_trend":       eventsTrend,
-		"fatal_trend":        fatalTrend,
-		"issues_trend":       issuesTrend,
-		"severity_24h":       map[string]any{"ok": 4521, "warn": 892, "err": 312},
-		"severity_hourly":    severityHourly,
-		"exception_hourly":   exceptionHourly,
-		"by_severity":        bySeverity,
-		"by_architecture":    byArch,
-		"by_pipeline":        byPipeline,
-		"top_issues":         topIssues,
+		"project":           map[string]any{"name": "Fleet Alpha", "slug": "fleet-alpha"},
+		"open_issues":       18,
+		"resolved_issues":   342,
+		"events_total":      7409,
+		"events_today":      612,
+		"fatal_open":        7,
+		"devices":           156,
+		"unhealthy_devices": 12,
+		"regressions":       3,
+		"events_hourly":     eventsHourly,
+		"events_trend":      eventsTrend,
+		"fatal_trend":       fatalTrend,
+		"issues_trend":      issuesTrend,
+		"severity_24h":      map[string]any{"ok": 4521, "warn": 892, "err": 312},
+		"severity_hourly":   severityHourly,
+		"exception_hourly":  exceptionHourly,
+		"by_severity":       bySeverity,
+		"by_architecture":   byArch,
+		"by_pipeline":       byPipeline,
+		"top_issues":        topIssues,
 	}
 }
 
@@ -182,23 +182,29 @@ func IssueDetail(id string) map[string]any {
 		}
 	}
 	n := now()
+	idPart := func(s string) string {
+		if len(s) < 8 {
+			return s
+		}
+		return s[4:8]
+	}
 	events := []map[string]any{
 		{
-			"id": "EVT-" + id[4:12] + "a", "event_id": "evt_" + id[4:20] + "a1b2c3d4", "severity": i["severity"],
+			"id": "EVT-" + idPart(id) + "a", "event_id": "evt_" + idPart(id) + "a1b2c3d4", "severity": i["severity"],
 			"state": "processed", "pipeline": "issue",
 			"frames":      `[{"function":"sensor_read","file":"sensor_driver.c","line":142,"address":4198720},{"function":"main_loop","file":"main.c","line":88,"address":4197440}]`,
 			"analysis":    `{"summary":"Dereference at sensor_driver.c:142 during initialization","architecture_name":"arm64","fault_details":{"pc":"0x00401280","sp":"0x2001FF00"},"unwind_method":"dwarf"}`,
 			"received_at": n.Add(-2 * time.Hour).Format(time.RFC3339),
 		},
 		{
-			"id": "EVT-" + id[4:12] + "b", "event_id": "evt_" + id[4:20] + "b2c3d4e5", "severity": i["severity"],
+			"id": "EVT-" + idPart(id) + "b", "event_id": "evt_" + idPart(id) + "b2c3d4e5", "severity": i["severity"],
 			"state": "processed", "pipeline": "issue",
 			"frames":      `[{"function":"sensor_read","file":"sensor_driver.c","line":142,"address":4198720},{"function":"process_sample","file":"pipeline.c","line":201,"address":4199100}]`,
 			"analysis":    `{"summary":"Same fingerprint","architecture_name":"arm64","unwind_method":"dwarf"}`,
 			"received_at": n.Add(-5 * time.Hour).Format(time.RFC3339),
 		},
 		{
-			"id": "EVT-" + id[4:12] + "c", "event_id": "evt_" + id[4:20] + "c3d4e5f6", "severity": i["severity"],
+			"id": "EVT-" + idPart(id) + "c", "event_id": "evt_" + idPart(id) + "c3d4e5f6", "severity": i["severity"],
 			"state": "processed", "pipeline": "issue",
 			"frames":      `[{"function":"sensor_init","file":"sensor_driver.c","line":87,"address":4198560}]`,
 			"analysis":    `{"summary":"First occurrence","architecture_name":"x86_64","unwind_method":"dwarf"}`,
@@ -269,9 +275,9 @@ func Releases() map[string]any {
 // ReleaseStats returns crash stats for a release.
 func ReleaseStats(id string) map[string]any {
 	return map[string]any{
-		"crash_free_rate":   97.3 + float64(rand.Intn(20))/100.0,
-		"sessions":          2400 + rand.Intn(600),
-		"crash_sessions":    30 + rand.Intn(80),
+		"crash_free_rate": 97.3 + float64(rand.Intn(20))/100.0,
+		"sessions":        2400 + rand.Intn(600),
+		"crash_sessions":  30 + rand.Intn(80),
 	}
 }
 
@@ -382,9 +388,11 @@ func Audit(offset, limit int) map[string]any {
 // Bootstrap returns bootstrap info for the UI settings page.
 func Bootstrap() map[string]any {
 	return map[string]any{
-		"bootstrapped": true,
-		"open_ui":      true,
-		"project":      map[string]any{"name": "Fleet Alpha", "slug": "fleet-alpha"},
+		"bootstrapped":    true,
+		"open_ui":         true,
+		"deployment":      "local",
+		"billing_enabled": false,
+		"project":         map[string]any{"name": "Fleet Alpha", "slug": "fleet-alpha"},
 	}
 }
 
@@ -431,6 +439,159 @@ func fmtHex(v int, n int) string {
 		v >>= 4
 	}
 	return string(b)
+}
+
+// FleetHealth returns fleet health summary data.
+func FleetHealth() map[string]any {
+	n := now()
+	avgScore := 72.3
+	healthyCount := 98
+	degradedCount := 42
+	criticalCount := 16
+
+	topHealthy := []map[string]any{
+		{"device_id": "FW-00a1b2-3c4d", "score": 98.5, "status": "healthy"},
+		{"device_id": "FW-00b2c3-4d5e", "score": 97.2, "status": "healthy"},
+		{"device_id": "FW-00c3d4-5e6f", "score": 96.8, "status": "healthy"},
+		{"device_id": "FW-00d4e5-6f70", "score": 95.1, "status": "healthy"},
+		{"device_id": "FW-00e5f6-7081", "score": 94.7, "status": "healthy"},
+	}
+
+	bottomDead := []map[string]any{
+		{"device_id": "FW-00f6a1-8192", "score": 12.3, "status": "critical"},
+		{"device_id": "FW-00a1b2-9203", "score": 18.7, "status": "critical"},
+		{"device_id": "FW-00b2c3-0314", "score": 24.1, "status": "critical"},
+		{"device_id": "FW-00c3d4-1425", "score": 28.9, "status": "degraded"},
+		{"device_id": "FW-00d4e5-2536", "score": 31.2, "status": "degraded"},
+	}
+
+	trend := []map[string]any{}
+	for i := 0; i < 14; i++ {
+		d := n.Add(-time.Duration(13-i) * 24 * time.Hour).Format("2006-01-02")
+		score := 60 + float64(rand.Intn(30))
+		trend = append(trend, map[string]any{"date": d, "score": score})
+	}
+
+	return map[string]any{
+		"average_score":  avgScore,
+		"median_score":   71.5,
+		"healthy_count":  healthyCount,
+		"degraded_count": degradedCount,
+		"critical_count": criticalCount,
+		"top_healthy":    topHealthy,
+		"bottom_dead":    bottomDead,
+		"trend":          trend,
+		"updated_at":     n.Format(time.RFC3339),
+	}
+}
+
+// DeviceHealth returns health data for a single device.
+func DeviceHealth(deviceID string) map[string]any {
+	n := now()
+	return map[string]any{
+		"device_id":      deviceID,
+		"score":          72.5,
+		"crash_factor":   0.6,
+		"uptime_factor":  0.85,
+		"battery_factor": 0.9,
+		"ota_factor":     0.95,
+		"temp_factor":    0.8,
+		"updated_at":     n.Format(time.RFC3339),
+		"status":         "degraded",
+	}
+}
+
+// MemorialDevices returns anonymized memorial wall data.
+func MemorialDevices() map[string]any {
+	items := []map[string]any{
+		{"id": "MEM-001", "arch": "cortex-m4", "mfr": "ST", "batch": "B2026-A",
+			"firmwareVersion": "v1.8.11", "firstSeen": "2026-01-15T10:00:00Z",
+			"lastSeen": "2026-07-10T14:30:00Z", "lastCrash": "EVT-deadbeef",
+			"daysSinceLastSeen": 36, "candlesLit": 3},
+		{"id": "MEM-002", "arch": "esp32", "mfr": "Espressif", "batch": "B2026-B",
+			"firmwareVersion": "v1.8.10", "firstSeen": "2026-02-01T08:00:00Z",
+			"lastSeen": "2026-07-12T09:15:00Z", "lastCrash": "EVT-cafebabe",
+			"daysSinceLastSeen": 34, "candlesLit": 7},
+		{"id": "MEM-003", "arch": "riscv64", "mfr": "SiFive", "batch": "B2026-C",
+			"firmwareVersion": "v1.7.5", "firstSeen": "2026-03-10T12:00:00Z",
+			"lastSeen": "2026-07-14T16:45:00Z", "lastCrash": "EVT-fedcba98",
+			"daysSinceLastSeen": 32, "candlesLit": 1},
+		{"id": "MEM-004", "arch": "xtensa", "mfr": "Espressif", "batch": "B2026-D",
+			"firmwareVersion": "v1.6.2", "firstSeen": "2025-11-20T06:00:00Z",
+			"lastSeen": "2026-06-28T11:20:00Z", "lastCrash": "EVT-01234567",
+			"daysSinceLastSeen": 48, "candlesLit": 12},
+		{"id": "MEM-005", "arch": "cortex-m33", "mfr": "Nordic", "batch": "B2026-E",
+			"firmwareVersion": "v2.0.1", "firstSeen": "2026-04-05T14:00:00Z",
+			"lastSeen": "2026-07-08T08:00:00Z", "lastCrash": "EVT-89abcdef",
+			"daysSinceLastSeen": 38, "candlesLit": 5},
+	}
+	return map[string]any{"items": items}
+}
+
+// PublicCrashes returns aggregate crash statistics.
+func PublicCrashes(days int) map[string]any {
+	n := now()
+	startDate := n.Add(-time.Duration(days) * 24 * time.Hour).Format("2006-01-02")
+	endDate := n.Format("2006-01-02")
+	return map[string]any{
+		"total_crashes":       14523,
+		"unique_fingerprints": 342,
+		"affected_devices":    8921,
+		"period":              startDate + " to " + endDate,
+		"by_severity": map[string]int{
+			"fatal": 234,
+			"error": 1892,
+			"warn":  12400,
+		},
+		"top_architectures": []map[string]any{
+			{"arch": "cortex-m4", "count": 5421},
+			{"arch": "riscv64", "count": 3200},
+			{"arch": "esp32", "count": 2800},
+			{"arch": "cortex-m33", "count": 1800},
+			{"arch": "xtensa", "count": 1302},
+		},
+	}
+}
+
+// PublicCrashesByArch returns crash counts by architecture.
+func PublicCrashesByArch() map[string]any {
+	return map[string]any{
+		"items": []map[string]any{
+			{"arch": "cortex-m4", "count": 5421},
+			{"arch": "riscv64", "count": 3200},
+			{"arch": "esp32", "count": 2800},
+			{"arch": "cortex-m33", "count": 1800},
+			{"arch": "xtensa", "count": 1302},
+		},
+	}
+}
+
+// PublicCrashesByRegion returns crash counts by region.
+func PublicCrashesByRegion() map[string]any {
+	return map[string]any{
+		"items": []map[string]any{
+			{"region": "US", "count": 4200},
+			{"region": "CN", "count": 3100},
+			{"region": "DE", "count": 2400},
+			{"region": "JP", "count": 1800},
+			{"region": "BR", "count": 1523},
+			{"region": "IN", "count": 1200},
+			{"region": "KR", "count": 800},
+			{"region": "GB", "count": 700},
+			{"region": "FR", "count": 500},
+			{"region": "OTHER", "count": 800},
+		},
+	}
+}
+
+// DeviceDNA returns device DNA data.
+func DeviceDNA() map[string]any {
+	items := []map[string]any{
+		{"device_id": "FW-00a1b2-3c4d", "mcu_uuid": "mcu-001-abc", "boot_time_avg": 45.2, "clock_freq": 64.0, "flash_wear": 12, "bootloader_sig": "sig-001", "fingerprint": "fp-001"},
+		{"device_id": "FW-00b2c3-4d5e", "mcu_uuid": "mcu-002-def", "boot_time_avg": 44.8, "clock_freq": 64.0, "flash_wear": 8, "bootloader_sig": "sig-001", "fingerprint": "fp-002"},
+		{"device_id": "FW-00c3d4-5e6f", "mcu_uuid": "mcu-003-ghi", "boot_time_avg": 46.1, "clock_freq": 63.9, "flash_wear": 15, "bootloader_sig": "sig-002", "fingerprint": "fp-003"},
+	}
+	return map[string]any{"items": items}
 }
 
 // Alert history seeded once at package init.

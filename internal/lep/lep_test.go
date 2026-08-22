@@ -190,7 +190,7 @@ func TestValidationErrorString(t *testing.T) {
 }
 
 func TestEncodeRejectsBadVersion(t *testing.T) {
-	_, err := lep.Encode(lep.Header{Version: 2}, nil)
+	_, err := lep.Encode(lep.Header{Version: 99}, nil)
 	if err == nil {
 		t.Fatal("expected")
 	}
@@ -207,6 +207,32 @@ func TestEmptyPayloadRoundTrip(t *testing.T) {
 	p, err := lep.Payload(raw)
 	if err != nil || len(p) != 0 {
 		t.Fatalf("%v %d", err, len(p))
+	}
+}
+
+func TestEncodeDefaultsToCurrentVersion(t *testing.T) {
+	payload := lep.EncodeTLVs([]lep.TLV{{Type: 1, Value: []byte("v")}})
+	raw, err := lep.Encode(lep.Header{Type: lep.TypeMessage, Architecture: 1}, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if raw[4] != lep.CurrentVersion {
+		t.Fatalf("encode version=%d, want %d", raw[4], lep.CurrentVersion)
+	}
+	if _, err := lep.Validate(raw); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateAcceptsV1AndV2(t *testing.T) {
+	for _, version := range []uint8{lep.Version1, lep.Version2} {
+		raw, err := lep.Encode(lep.Header{Type: lep.TypeLog, Architecture: 1, Version: version}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := lep.Validate(raw); err != nil {
+			t.Fatalf("version %d rejected: %v", version, err)
+		}
 	}
 }
 

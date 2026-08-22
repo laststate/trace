@@ -45,11 +45,11 @@ func CheckEvents(ctx context.Context, r Resolver, orgID uuid.UUID, now time.Time
 		}
 	}
 	return &ErrQuotaExceeded{
-		Reason:    "monthly event quota exhausted",
-		Kind:      store.UsageKindEvents,
-		PlanTier:  p.Sub.PlanTier,
-		Limit:     p.EventsPerMonth,
-		Current:   cur.Counter,
+		Reason:     "monthly event quota exhausted",
+		Kind:       store.UsageKindEvents,
+		PlanTier:   p.Sub.PlanTier,
+		Limit:      p.EventsPerMonth,
+		Current:    cur.Counter,
 		RetryAfter: hint,
 	}
 }

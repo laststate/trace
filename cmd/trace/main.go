@@ -32,6 +32,11 @@ func main() {
 
 	cfg := config.Load()
 
+	if cfg.IsLocal() {
+		log.Info("starting in LOCAL deployment mode — everything unlocked (no auth gate, no quotas, no paywall)",
+			"deployment", cfg.Deployment)
+	}
+
 	// Generate random admin password if empty and Bootstrap is enabled.
 	// This ensures the admin user always has a strong password.
 	if cfg.Bootstrap && cfg.AdminPassword == "" {
@@ -67,6 +72,7 @@ func main() {
 				"addr", cfg.Listen,
 				"open_ui", true,
 				"mode", "mock",
+				"deployment", "local",
 			)
 			if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				log.Error("http", "err", err)
@@ -217,6 +223,7 @@ func main() {
 	}
 
 	srv := &api.Server{Cfg: cfg, Store: st, Object: obj, Queue: q, Log: log, UI: ui}
+	srv.LogInsecureDefaults()
 	httpSrv := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           srv.Handler(),
@@ -233,6 +240,8 @@ func main() {
 			"public_url", cfg.PublicURL,
 			"open_ui", cfg.OpenUI,
 			"mode", cfg.Mode,
+			"deployment", cfg.Deployment,
+			"billing_enabled", !cfg.IsLocal(),
 			"s3", cfg.S3Endpoint != "",
 			"oidc", cfg.OIDCIssuer != "",
 			"queue", cfg.QueueDriver,

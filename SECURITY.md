@@ -1,0 +1,79 @@
+# Security Policy
+
+Report suspected vulnerabilities through the repository's [private vulnerability
+reporting form](https://github.com/laststate/trace/security/advisories/new).
+Do not open a public issue containing API keys, captured memory, exploit
+details, or production endpoint credentials.
+
+## Security defaults
+
+| Setting | Default | Notes |
+|---------|---------|-------|
+| `TRACE_ALLOW_PUBLIC_REGISTER` | `false` | Viewer-only if enabled |
+| `TRACE_OIDC_AUTO_JOIN` | `false` | Invite/membership required |
+| `TRACE_SAML_INSECURE` | `false` | Unsigned ACS disabled |
+| `TRACE_TRUSTED_PROXIES` | empty | XFF ignored unless peer matches |
+| `TRACE_SECRETS_KEY` | empty | AES-GCM for channel/alert secrets when set |
+| `TRACE_COOKIE_SECURE` | auto | `true` when `TRACE_PUBLIC_URL` is https |
+
+`ValidateProduction()` rejects open UI, public register, SAML insecure, and OIDC auto-join.
+
+## Sessions
+
+Browser sessions use an **HttpOnly** cookie (`trace_session`). Bearer tokens
+remain supported for Relay and scripts. Prefer cookies for the SPA
+(`credentials: 'same-origin'`).
+
+## Cryptographic design
+
+- **Secrets at rest**: AES-GCM encrypts channel and alert secrets when
+  `TRACE_SECRETS_KEY` is set. Key material is derived from a 256-bit random
+  value and never stored in plaintext.
+- **Token comparison**: Bearer tokens use constant-time comparison to prevent
+  timing attacks.
+- **Webhook signatures**: Outbound webhooks validate URLs (SSRF protection)
+  and use exponential backoff for retries.
+
+## Feature maturity
+
+| Feature | Status |
+|---------|--------|
+| Password login + scopes | Supported |
+| OIDC (PKCE, JWKS) | Supported; membership required |
+| SAML ACS | Experimental; not production-ready |
+| SCIM | Not implemented (HTTP 501) |
+
+## Production hardening
+
+```bash
+export TRACE_ENV=production
+export TRACE_OPEN_UI=false
+export TRACE_ALLOW_PUBLIC_REGISTER=false
+export TRACE_OIDC_AUTO_JOIN=false
+export TRACE_SAML_INSECURE=false
+export TRACE_TRUSTED_PROXIES=10.0.0.0/8,172.16.0.0/12
+export TRACE_SECRETS_KEY="$(openssl rand -base64 32)"
+export TRACE_QUEUE=postgres   # or redis
+```
+
+## Incident response
+
+### Vulnerability disclosure
+
+1. Submit details through the [private vulnerability reporting form](https://github.com/laststate/trace/security/advisories/new).
+2. Acknowledge receipt within 48 hours.
+3. Work with maintainers to validate and patch.
+4. Coordinate disclosure timeline with the reporter.
+5. Publish security advisory after patch is available.
+
+### Security contact
+
+For urgent security issues, contact the maintainers directly via the GitHub
+private vulnerability reporting form.
+
+## Dependencies
+
+- **SBOM generation**: Generated on every CI run.
+- **Trivy scanning**: Filesystem scans against the source tree in CI.
+- **govulncheck**: Go vulnerability scanner run as part of the security job.
+- **Dependabot**: Automated dependency updates for Go modules and GitHub Actions.

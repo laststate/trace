@@ -193,11 +193,11 @@ func ValidateSeverity(severity string) bool {
 // ValidateStatus validates issue status
 func ValidateStatus(status string) bool {
 	valid := map[string]bool{
-		"open":        true,
+		"open":          true,
 		"investigating": true,
-		"resolved":    true,
-		"ignored":     true,
-		"archived":    true,
+		"resolved":      true,
+		"ignored":       true,
+		"archived":      true,
 	}
 	return valid[strings.ToLower(status)]
 }
@@ -205,11 +205,11 @@ func ValidateStatus(status string) bool {
 // ValidatePipeline validates event pipeline type
 func ValidatePipeline(pipeline string) bool {
 	valid := map[string]bool{
-		"issue":   true,
-		"health":  true,
-		"log":     true,
-		"metric":  true,
-		"boot":    true,
+		"issue":  true,
+		"health": true,
+		"log":    true,
+		"metric": true,
+		"boot":   true,
 	}
 	return valid[strings.ToLower(pipeline)]
 }
@@ -239,14 +239,14 @@ func ValidateArchitecture(arch int16) bool {
 // ValidateLEPType validates LEP event type
 func ValidateLEPType(typ int16) bool {
 	valid := map[int16]bool{
-		1:  true, // health
-		2:  true, // error
-		3:  true, // crash
-		4:  true, // coredump
-		5:  true, // log
-		6:  true, // message
-		7:  true, // peripheral
-		8:  true, // reset
+		1: true, // health
+		2: true, // error
+		3: true, // crash
+		4: true, // coredump
+		5: true, // log
+		6: true, // message
+		7: true, // peripheral
+		8: true, // reset
 	}
 	return valid[typ]
 }
@@ -290,11 +290,11 @@ func ValidateHeader(value string) bool {
 // ValidateContentType validates Content-Type header
 func ValidateContentType(ct string) bool {
 	validTypes := map[string]bool{
-		"application/json":              true,
-		"application/octet-stream":      true,
+		"application/json":                   true,
+		"application/octet-stream":           true,
 		"application/vnd.laststate.batch.v1": true,
-		"text/plain":                    true,
-		"multipart/form-data":           true,
+		"text/plain":                         true,
+		"multipart/form-data":                true,
 	}
 	return validTypes[strings.ToLower(ct)]
 }

@@ -45,23 +45,23 @@ const DefaultClockSkew = 5 * time.Minute
 // billing_event_id MUST be unique per logical event from the billing service
 // (Stripe event id, MP notification id, etc.) so retries are idempotent.
 type ApplyEntitlementsRequest struct {
-	BillingEventID        string     `json:"billing_event_id"`
-	PlanTier              string     `json:"plan_tier"`
-	SubscriptionStatus    string     `json:"subscription_status"`
-	GracePeriodEndsAt     *time.Time `json:"grace_period_ends_at,omitempty"`
-	BillingCustomerRef    string     `json:"billing_customer_ref,omitempty"`
-	BillingSubscriptionRef string    `json:"billing_subscription_ref,omitempty"`
-	Reason                string     `json:"reason,omitempty"`
+	BillingEventID         string     `json:"billing_event_id"`
+	PlanTier               string     `json:"plan_tier"`
+	SubscriptionStatus     string     `json:"subscription_status"`
+	GracePeriodEndsAt      *time.Time `json:"grace_period_ends_at,omitempty"`
+	BillingCustomerRef     string     `json:"billing_customer_ref,omitempty"`
+	BillingSubscriptionRef string     `json:"billing_subscription_ref,omitempty"`
+	Reason                 string     `json:"reason,omitempty"`
 }
 
 // ApplyEntitlementsResponse is what we return to the billing service.
 type ApplyEntitlementsResponse struct {
-	OrganizationID      uuid.UUID `json:"organization_id"`
-	PlanTier            string    `json:"plan_tier"`
-	SubscriptionStatus  string    `json:"subscription_status"`
+	OrganizationID      uuid.UUID  `json:"organization_id"`
+	PlanTier            string     `json:"plan_tier"`
+	SubscriptionStatus  string     `json:"subscription_status"`
 	GracePeriodEndsAt   *time.Time `json:"grace_period_ends_at,omitempty"`
-	AppliedAt           time.Time `json:"applied_at"`
-	IdempotentDuplicate bool      `json:"idempotent_duplicate"`
+	AppliedAt           time.Time  `json:"applied_at"`
+	IdempotentDuplicate bool       `json:"idempotent_duplicate"`
 }
 
 // ApplyEntitlementsStore is the slice of *store.Store used by the handler. We

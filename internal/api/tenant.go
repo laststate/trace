@@ -28,6 +28,15 @@ func (s *Server) activeTenant(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sess, ok := sessionFrom(s, r)
 		if !ok {
+			// Local deployment mode: install the default project's org as the
+			// active tenant so org-scoped endpoints (usage, billing) work even
+			// when the operator has not logged in.
+			if s.Cfg.IsLocal() && s.Store != nil {
+				if p, err := s.Store.DefaultProject(r.Context()); err == nil {
+					next.ServeHTTP(w, withSessionAndOrg(r, store.Session{}, ActiveTenant{OrgID: p.OrganizationID}))
+					return
+				}
+			}
 			next.ServeHTTP(w, r)
 			return
 		}

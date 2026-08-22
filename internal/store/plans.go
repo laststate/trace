@@ -32,13 +32,13 @@ type PlanLimit struct {
 
 // OrgSubscription is the per-organization billing state.
 type OrgSubscription struct {
-	OrganizationID        uuid.UUID  `json:"organization_id"`
-	PlanTier              string     `json:"plan_tier"`
-	SubscriptionStatus    string     `json:"subscription_status"`
-	GracePeriodEndsAt     *time.Time `json:"grace_period_ends_at,omitempty"`
-	TrialEndsAt           *time.Time `json:"trial_ends_at,omitempty"`
-	BillingCustomerRef    string     `json:"billing_customer_ref,omitempty"`
-	BillingSubscriptionRef string    `json:"billing_subscription_ref,omitempty"`
+	OrganizationID         uuid.UUID  `json:"organization_id"`
+	PlanTier               string     `json:"plan_tier"`
+	SubscriptionStatus     string     `json:"subscription_status"`
+	GracePeriodEndsAt      *time.Time `json:"grace_period_ends_at,omitempty"`
+	TrialEndsAt            *time.Time `json:"trial_ends_at,omitempty"`
+	BillingCustomerRef     string     `json:"billing_customer_ref,omitempty"`
+	BillingSubscriptionRef string     `json:"billing_subscription_ref,omitempty"`
 }
 
 // ErrUnknownPlan is returned when a tier does not exist in plan_limits.

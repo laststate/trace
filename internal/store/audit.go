@@ -14,13 +14,13 @@ import (
 // AuditChainGap is one place where the hash chain breaks or an entry_hash is
 // missing. Returned by VerifyAuditChain in order (chronological).
 type AuditChainGap struct {
-	Index       int       `json:"index"`        // 0-based position in the selected window
-	EntryID     uuid.UUID `json:"entry_id"`
-	CreatedAt   time.Time `json:"created_at"`
-	Reason      string    `json:"reason"` // "missing_prev", "missing_hash", "broken_link", "invalid_hash"
-	StoredHash  string    `json:"stored_hash,omitempty"`
-	ExpectedHash string   `json:"expected_hash,omitempty"`
-	PrevHash    string    `json:"prev_hash,omitempty"`
+	Index        int       `json:"index"` // 0-based position in the selected window
+	EntryID      uuid.UUID `json:"entry_id"`
+	CreatedAt    time.Time `json:"created_at"`
+	Reason       string    `json:"reason"` // "missing_prev", "missing_hash", "broken_link", "invalid_hash"
+	StoredHash   string    `json:"stored_hash,omitempty"`
+	ExpectedHash string    `json:"expected_hash,omitempty"`
+	PrevHash     string    `json:"prev_hash,omitempty"`
 }
 
 // VerifyAuditChain walks the audit log in chronological order over the window
@@ -140,14 +140,14 @@ LIMIT $2`, orgID, limit)
 			return nil, err
 		}
 		item := map[string]any{
-			"id": id,
-			"created_at": createdAt.Format(time.RFC3339),
-			"action": action,
+			"id":          id,
+			"created_at":  createdAt.Format(time.RFC3339),
+			"action":      action,
 			"target_type": targetType,
-			"target_id": targetID,
-			"metadata": metadata,
-			"ip_address": ip,
-			"user_agent": ua,
+			"target_id":   targetID,
+			"metadata":    metadata,
+			"ip_address":  ip,
+			"user_agent":  ua,
 		}
 		if actorID != nil {
 			item["actor_id"] = *actorID

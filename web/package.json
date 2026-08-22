@@ -1,13 +1,13 @@
 {
   "name": "trace-web",
   "private": true,
-  "version": "0.8.0",
+  "version": "0.10.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 127.0.0.1 --port 4173 --strictPort",
-    "test": "npx --yes tsx src/App.test.ts && npx --yes tsx src/helpers.test.ts",
+    "test": "npx --yes tsx src/App.test.ts && npx --yes tsx src/helpers.test.ts && npx --yes tsx src/lep/codec.test.ts",
     "test:e2e": "playwright test",
     "test:e2e:install": "playwright install chromium",
     "serve:dist": "vite preview --host 127.0.0.1 --port 4173 --strictPort"

@@ -18,6 +18,7 @@ package api
 // across restarts. Authentication is bypassed — the handler treats every
 // request as coming from an authenticated admin user.
 import (
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -70,6 +71,7 @@ func (s *MockServer) Handler() http.Handler {
 
 	// API endpoints with mock data
 	mux.HandleFunc("GET /api/overview", s.handleOverview)
+	mux.HandleFunc("GET /api/stream", s.handleStream)
 	mux.HandleFunc("GET /api/issues", s.handleIssuesPage)
 	mux.HandleFunc("GET /api/issues/{id}", s.handleIssueDetail)
 	mux.HandleFunc("POST /api/issues/{id}/status", s.handleIssueStatus)
@@ -138,6 +140,13 @@ func (s *MockServer) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/relay/capabilities", s.handleCapabilities)
 	mux.HandleFunc("GET /openapi.json", s.handleOpenAPI)
 
+	// Billing & usage (mock = local deployment: everything unlocked)
+	mux.HandleFunc("GET /v1/billing/tiers", s.handleBillingTiers)
+	mux.HandleFunc("GET /v1/billing/subscription", s.handleBillingSubscription)
+	mux.HandleFunc("POST /v1/billing/checkout", s.handleBillingCheckout)
+	mux.HandleFunc("GET /v1/billing/plans", s.handleBillingPlans)
+	mux.HandleFunc("GET /v1/usage", s.handleUsage)
+
 	// Ingest endpoints (accept but don't store)
 	mux.HandleFunc("POST /v1/ingest", s.handleIngest)
 	mux.HandleFunc("POST /v1/events", s.handleIngest)
@@ -182,6 +191,47 @@ func (s *MockServer) Handler() http.Handler {
 
 func (s *MockServer) handleOverview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, mockdata.Overview())
+}
+
+// handleStream pushes fresh mock overview snapshots over SSE so the mock UI
+// has the same real-time behavior as the production server.
+func (s *MockServer) handleStream(w http.ResponseWriter, r *http.Request) {
+	fl, ok := w.(http.Flusher)
+	if !ok {
+		writeErr(w, 500, "no_stream", "streaming unsupported by connection", false)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	send := func(event string, payload any) bool {
+		b, err := json.Marshal(payload)
+		if err != nil {
+			return true
+		}
+		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b); err != nil {
+			return false
+		}
+		fl.Flush()
+		return true
+	}
+	if !send("hello", map[string]any{"ok": true, "ts": time.Now().UTC()}) {
+		return
+	}
+	tick := time.NewTicker(3 * time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-tick.C:
+			if !send("overview", mockdata.Overview()) {
+				return
+			}
+		}
+	}
 }
 
 func (s *MockServer) handleIssuesPage(w http.ResponseWriter, r *http.Request) {
@@ -450,11 +500,11 @@ func (s *MockServer) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 
 func (s *MockServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{
-		"retention_events_days": 90,
-		"retention_health_days": 30,
-		"retention_logs_days":   14,
+		"retention_events_days":  90,
+		"retention_health_days":  30,
+		"retention_logs_days":    14,
 		"retention_metrics_days": 30,
-		"analyzer_version_min":  1,
+		"analyzer_version_min":   1,
 	})
 }
 
@@ -481,20 +531,77 @@ func (s *MockServer) handleAnalyticsExport(w http.ResponseWriter, r *http.Reques
 
 func (s *MockServer) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{
-		"api_version":    "1",
-		"lep_versions":   []int{1},
-		"max_event_size": 1048576,
-		"compression":    []string{"identity", "zstd"},
-		"batch_ingest":   true,
-		"binary_batch":   true,
+		"api_version":     "1",
+		"lep_versions":    []int{1, 2},
+		"max_event_size":  1048576,
+		"compression":     []string{"identity", "zstd"},
+		"batch_ingest":    true,
+		"binary_batch":    true,
 		"artifact_upload": true,
-		"authentication": []string{"bearer", "cookie"},
-		"server_id":      "trace-mock-v0.8.0",
-		"oidc":           false,
-		"saml":           false,
-		"scim":           false,
-		"public_register": false,
-		"queue":          "mock",
+		"authentication":  []string{"bearer", "cookie"},
+		"server_id":       "trace-mock-v0.8.0",
+		"oidc":            false,
+		"saml":            false,
+		"scim":            false,
+		"public_register": true,
+		"queue":           "mock",
+		"deployment":      "local",
+		"billing_enabled": false,
+	})
+}
+
+func (s *MockServer) handleBillingTiers(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, map[string]any{
+		"items": []map[string]any{
+			{
+				"id": "local", "name": "Everything unlocked", "priceCents": 0, "currency": "usd",
+				"maxDevices": -1, "maxEventsPerDay": -1, "retentionDays": -1,
+				"maxApiTokens": -1, "maxAlertRules": -1,
+				"isUnlimitedDevices": true, "isUnlimitedEvents": true, "isUnlimitedRetention": true,
+				"features": []string{"all_features", "unlimited_devices", "unlimited_events", "no_paywall"},
+			},
+		},
+		"tiers":    []map[string]any{},
+		"currency": "usd", "interval": "month",
+		"deployment": "local", "billing_enabled": false,
+	})
+}
+
+func (s *MockServer) handleBillingSubscription(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodDelete {
+		writeErr(w, 400, "billing_disabled", "subscriptions are not used in local deployment mode", false)
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"id": "local", "planId": "local", "plan_id": "local", "status": "active",
+		"provider": "self_hosted", "currentPeriodEnd": "", "current_period_end": "",
+		"deployment": "local", "billing_enabled": false,
+	})
+}
+
+func (s *MockServer) handleBillingCheckout(w http.ResponseWriter, r *http.Request) {
+	writeErr(w, 400, "billing_disabled", "billing is not available in local deployment mode — everything is unlocked", false)
+}
+
+func (s *MockServer) handleBillingPlans(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, map[string]any{
+		"plans": []map[string]any{
+			{"id": "local", "name": "Everything unlocked", "price": "Free", "highlight": true,
+				"features": []string{"unlimited devices", "unlimited events", "unlimited retention", "no paywall"}},
+		},
+		"interval": "month", "deployment": "local", "billing_enabled": false,
+	})
+}
+
+func (s *MockServer) handleUsage(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, map[string]any{
+		"metrics": []map[string]any{
+			{"metric_name": "events", "value": 1284},
+			{"metric_name": "devices", "value": 42},
+			{"metric_name": "api_calls", "value": 310},
+			{"metric_name": "releases", "value": 6},
+			{"metric_name": "issues", "value": 23},
+		},
 	})
 }
 

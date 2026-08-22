@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net"
 	"net/http"
 	"strings"
@@ -107,9 +108,9 @@ func (c *connLimiter) release(ip string) {
 // TrustedProxyStore holds parsed CIDRs/IPs from TRACE_TRUSTED_PROXIES.
 // This is server-scoped so it can be updated on config reload.
 type TrustedProxyStore struct {
-	mu        sync.RWMutex
-	proxies   []*net.IPNet
-	allowXFF  bool // whether to honor X-Forwarded-For at all
+	mu       sync.RWMutex
+	proxies  []*net.IPNet
+	allowXFF bool // whether to honor X-Forwarded-For at all
 }
 
 var globalProxyStore = &TrustedProxyStore{}
@@ -208,13 +209,13 @@ func withSecurity(next http.Handler, ratePerMin, maxConns int) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := clientIPFrom(r, "leftmost")
 		if !cl.acquire(ip) {
-			http.Error(w, `{"error":{"code":"too_many_connections","message":"connection limit"}}`, http.StatusServiceUnavailable)
+			writeJSONError(w, http.StatusServiceUnavailable, "too_many_connections", "connection limit")
 			return
 		}
 		defer cl.release(ip)
 		if !rl.allow(ip) {
 			w.Header().Set("Retry-After", "60")
-			http.Error(w, `{"error":{"code":"rate_limited","message":"too many requests"}}`, http.StatusTooManyRequests)
+			writeJSONError(w, http.StatusTooManyRequests, "rate_limited", "too many requests")
 			return
 		}
 		tid := r.Header.Get("X-Trace-ID")
@@ -230,6 +231,21 @@ func withSecurity(next http.Handler, ratePerMin, maxConns int) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		w.Header().Set("X-XSS-Protection", "1; mode=block")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// writeJSONError writes a JSON error response.
+func writeJSONError(w http.ResponseWriter, status int, code, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]any{
+		"error": map[string]string{
+			"code":    code,
+			"message": message,
+		},
 	})
 }

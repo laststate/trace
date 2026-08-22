@@ -46,8 +46,8 @@ func (s *Server) apiCreateExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 201, map[string]any{
-		"id":     exportID,
-		"status": "pending",
+		"id":      exportID,
+		"status":  "pending",
 		"message": "Export created, processing in background",
 	})
 }

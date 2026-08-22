@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/klauspost/compress/zstd"
 	"sync"
 
 	"github.com/laststate/trace/internal/artifact"
@@ -34,8 +36,8 @@ type Server struct {
 	Queue  interface {
 		Enqueue(ctx context.Context, typ string, payload any) error
 	}
-	Log *slog.Logger
-	UI  http.FileSystem
+	Log    *slog.Logger
+	UI     http.FileSystem
 	Mailer mailer.Mailer
 
 	// loginLockout tracks failed login attempts per email for brute-force protection.
@@ -108,6 +110,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/releases/compare", s.requireUI(s.apiCompareReleases, "viewer"))
 	mux.HandleFunc("GET /api/boots", s.requireUI(s.apiBootSessions, "viewer"))
 	mux.HandleFunc("GET /api/overview", s.requireUI(s.apiOverview, "viewer"))
+	mux.HandleFunc("GET /api/stream", s.requireUI(s.apiStream, "viewer"))
 	mux.HandleFunc("GET /api/search", s.requireUI(s.apiSearchFull, "viewer"))
 	mux.HandleFunc("GET /api/query/events", s.requireUI(s.apiQueryEvents, "viewer"))
 	mux.HandleFunc("GET /scim/v2/Users", s.requireUI(s.apiSCIMUsers, "admin"))
@@ -194,6 +197,15 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/org-tokens", s.requireAuth(http.HandlerFunc(s.apiCreateOrgToken)))
 	mux.Handle("GET /api/me/usage", s.requireAuth(http.HandlerFunc(s.apiMeUsage)))
 
+	// Billing & usage (deployment-aware). In enterprise mode these sit behind
+	// auth; in local mode requireUI/requireAuth pass everything through.
+	mux.Handle("GET /v1/billing/tiers", s.requireUI(s.apiBillingTiers, "viewer"))
+	mux.Handle("GET /v1/billing/subscription", s.requireUI(s.apiBillingSubscription, "viewer"))
+	mux.Handle("DELETE /v1/billing/subscription", s.requireUI(s.apiBillingSubscription, "viewer"))
+	mux.Handle("POST /v1/billing/checkout", s.requireUI(s.apiBillingCheckout, "viewer"))
+	mux.Handle("GET /v1/billing/plans", s.requireUI(s.apiBillingPlans, "viewer"))
+	mux.Handle("GET /v1/usage", s.requireUI(s.apiUsageMetrics, "viewer"))
+
 	// Admin API (HMAC-signed). NOT covered by activeTenant — these endpoints
 	// are called by the proprietary billing service.
 	mux.HandleFunc("POST /v1/admin/organizations/{id}/entitlements", s.adminApplyEntitlements)
@@ -219,8 +231,48 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/hardware", s.requireUI(s.apiCreateHardware, "maintainer"))
 	mux.HandleFunc("GET /api/hardware/compare", s.requireUI(s.apiHardwareCompare, "viewer"))
 
+	// Fleet Health
+	mux.HandleFunc("GET /api/fleet/health", s.requireUI(s.apiFleetHealth, "viewer"))
+	mux.HandleFunc("GET /api/fleet/health/devices/{id}", s.requireUI(s.apiFleetHealthDevice, "viewer"))
+
+	// Chaos Engineering
+	mux.HandleFunc("GET /api/chaos/status", s.requireUI(s.apiChaosStatus, "admin"))
+	mux.HandleFunc("POST /api/chaos/inject", s.requireUI(s.apiChaosInject, "admin"))
+	mux.HandleFunc("GET /api/chaos/results", s.requireUI(s.apiChaosResults, "admin"))
+
+	// Memorial Wall
+	mux.HandleFunc("GET /api/memorial/devices", s.requireUI(s.apiMemorialDevices, "viewer"))
+
+	// Public Crash API (no auth required)
+	mux.HandleFunc("GET /api/public/crashes", s.apiPublicCrashes)
+	mux.HandleFunc("GET /api/public/crashes/by-arch", s.apiPublicCrashesByArch)
+	mux.HandleFunc("GET /api/public/crashes/by-region", s.apiPublicCrashesByRegion)
+
+	// Device DNA
+	mux.HandleFunc("GET /api/devices/dna", s.requireUI(s.apiDeviceDNA, "viewer"))
+	mux.HandleFunc("GET /api/devices/dna/clones", s.requireUI(s.apiDeviceDNAClones, "viewer"))
+
+	// Anomaly Detection
+	mux.HandleFunc("GET /api/anomaly/events", s.requireUI(s.apiAnomalyEvents, "viewer"))
+	mux.HandleFunc("GET /api/anomaly/thresholds", s.requireUI(s.apiAnomalyThresholds, "admin"))
+	mux.HandleFunc("POST /api/anomaly/thresholds", s.requireUI(s.apiAnomalyThresholds, "admin"))
+
+	// Postmortem
+	mux.HandleFunc("POST /api/issues/{id}/postmortem", s.requireUI(s.apiPostmortemGenerate, "viewer"))
+
+	// Soundboard
+	mux.HandleFunc("GET /api/soundboard/status", s.requireUI(s.apiSoundboardStatus, "viewer"))
+
+	// Crash-to-PR
+	mux.HandleFunc("GET /api/pr/status", s.requireUI(s.apiPRStatus, "viewer"))
+	mux.HandleFunc("POST /api/pr/create", s.requireUI(s.apiPRCreate, "maintainer"))
+	mux.HandleFunc("GET /api/prs", s.requireUI(s.apiPRList, "viewer"))
+
 	if s.UI != nil {
-		fileServer := http.FileServer(s.UI)
+		// Wrap the file server with SRI injection so HTML responses carry
+		// integrity hashes on <script> and <link> tags. Non-HTML assets pass
+		// through unchanged.
+		fileServer := sriMiddleware(s.UI)
 		mux.Handle("GET /", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/v1/") || strings.HasPrefix(r.URL.Path, "/health/") || r.URL.Path == "/metrics" || r.URL.Path == "/openapi.json" {
 				http.NotFound(w, r)
@@ -291,17 +343,25 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 	} else {
 		checks["migrations"] = "ok"
 	}
+	// Check for insecure defaults — if any are detected, flag the response
+	// without refusing the health check (operators may be in dev mode).
+	insecure := s.checkInsecureDefaults()
+	if len(insecure) > 0 {
+		checks["security"] = "insecure defaults detected — see logs"
+	}
 	if !ok {
 		writeJSON(w, 503, map[string]any{"status": "not_ready", "checks": checks})
 		return
 	}
-	writeJSON(w, 200, map[string]any{"status": "ready", "checks": checks, "version": s.Cfg.AppVersion})
+	// If sslmode=disable is detected, downgrade from 200 to 200 with a
+	// warning marker so probes can distinguish secure vs insecure readiness.
+	writeJSON(w, 200, map[string]any{"status": "ready", "checks": checks, "version": s.Cfg.AppVersion, "insecure_defaults": insecure})
 }
 
 func (s *Server) capabilities(w http.ResponseWriter, _ *http.Request) {
 	max := s.Cfg.MaxEventSize
 	writeJSON(w, 200, map[string]any{
-		"api_version": "1", "lep_versions": []int{1}, "max_event_size": max,
+		"api_version": "1", "lep_versions": []int{1, 2}, "max_event_size": max,
 		"max_batch_events": s.Cfg.MaxBatchEvents, "max_batch_bytes": s.Cfg.MaxBatchBytes,
 		// zstd advertised when binary batch path supports it via content-encoding
 		"compression":     []string{"identity", "zstd"},
@@ -315,9 +375,102 @@ func (s *Server) capabilities(w http.ResponseWriter, _ *http.Request) {
 		"scim":            false, // stub only
 		"public_register": s.Cfg.AllowPublicRegister,
 		"queue":           s.Cfg.QueueDriver,
+		"deployment":      s.Cfg.Deployment,
+		"billing_enabled": !s.Cfg.IsLocal(),
 	})
 }
 
+// checkInsecureDefaults inspects the running configuration for security
+// concerns and returns a list of warning messages. Each warning describes
+// a setting that should be tightened in production. This is intentionally
+// non-blocking: it logs but does not refuse to start.
+//
+// Checks performed:
+//   - Database URL sslmode=disable
+//   - TRACE_SECRETS_KEY not set or empty
+//   - TRACE_ADMIN_PASSWORD empty (auto-generated)
+//   - TRACE_OPEN_UI is true (public UI access)
+func (s *Server) checkInsecureDefaults() []string {
+	var warnings []string
+
+	// Database URL sslmode check.
+	if s.Cfg.DatabaseURL != "" && strings.Contains(s.Cfg.DatabaseURL, "sslmode=disable") {
+		warnings = append(warnings, "database sslmode=disable — connections are unencrypted")
+	}
+
+	// Secrets key: AES-GCM at-rest encryption disabled.
+	if s.Cfg.SecretsKey == "" {
+		warnings = append(warnings, "TRACE_SECRETS_KEY not set — secrets are stored in plaintext")
+	}
+
+	// Admin password: empty means auto-generated, which is fine for dev but
+	// should be explicitly set in production.
+	if s.Cfg.AdminPassword == "" {
+		warnings = append(warnings, "TRACE_ADMIN_PASSWORD not set — auto-generated; set explicitly in production")
+	}
+
+	// Open UI: public access without authentication.
+	if s.Cfg.OpenUI && !s.Cfg.IsLocal() {
+		warnings = append(warnings, "TRACE_OPEN_UI=true — UI is publicly accessible without authentication")
+	}
+
+	return warnings
+}
+
+// logInsecureDefaults writes a single warning log entry summarizing any
+// insecure defaults found in the active configuration. Called once at
+// startup.
+func (s *Server) LogInsecureDefaults() {
+	warnings := s.checkInsecureDefaults()
+	if len(warnings) == 0 {
+		return
+	}
+	for _, w := range warnings {
+		s.Log.Warn("insecure default detected", "warning", w)
+	}
+}
+
+// (No ingest.go file exists yet; functions remain in server.go.)
+
+var errForbidden = errors.New("forbidden")
+
+// nowFunc returns the current UTC time. Tests may swap this for a fixed clock.
+var nowFunc = func() time.Time { return time.Now().UTC() }
+
+func (s *Server) requireIngest(r *http.Request, scope string) (store.Token, error) {
+	secret, err := auth.Bearer(r.Header.Get("Authorization"))
+	if err != nil {
+		return store.Token{}, err
+	}
+	tok, err := s.Store.AuthIngestToken(r.Context(), secret)
+	if err != nil {
+		return store.Token{}, err
+	}
+	if scope != "" && !store.TokenHasScope(tok, scope) {
+		return store.Token{}, errForbidden
+	}
+	return tok, nil
+}
+
+// pipelineForType selects the processing pipeline based on event type.
+func pipelineForType(t uint8) string {
+	switch t {
+	case lep.TypeHealth:
+		return "health"
+	case lep.TypeLog, lep.TypeMessage:
+		return "log"
+	case lep.TypePeripheral:
+		return "metric"
+	case lep.TypeReset:
+		return "boot"
+	case lep.TypeCrash, lep.TypeCoredump, lep.TypeError:
+		return "issue"
+	default:
+		return "issue"
+	}
+}
+
+// ingest handles a single LEP event envelope from a relay.
 func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 	metrics.IngestTotal.Add(1)
 	tok, err := s.requireIngest(r, "event:write")
@@ -389,13 +542,7 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-type batchRequest struct {
-	Events []struct {
-		EventID string `json:"event_id"`
-		Payload []byte `json:"payload"`
-	} `json:"events"`
-}
-
+// ingestBatch handles a batch of LEP event envelopes from a relay.
 func (s *Server) ingestBatch(w http.ResponseWriter, r *http.Request) {
 	metrics.IngestTotal.Add(1)
 	tok, err := s.requireIngest(r, "event:write")
@@ -417,6 +564,31 @@ func (s *Server) ingestBatch(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, 400, "invalid_body", "could not read body", false)
 		return
+	}
+	// Relay may send batches compressed (Content-Encoding: zstd) when we
+	// advertise "zstd" in /v1/relay/capabilities — decode before parsing.
+	if enc := r.Header.Get("Content-Encoding"); enc != "" && !strings.EqualFold(enc, "identity") {
+		if !strings.EqualFold(enc, "zstd") {
+			writeErr(w, 415, "unsupported_encoding", "Content-Encoding must be identity or zstd", false)
+			return
+		}
+		zdec, zerr := zstd.NewReader(bytes.NewReader(raw),
+			zstd.WithDecoderConcurrency(1),
+			zstd.WithDecoderMaxMemory(uint64(maxBody)))
+		if zerr != nil {
+			writeErr(w, 400, "invalid_body", "zstd init: "+zerr.Error(), false)
+			return
+		}
+		defer zdec.Close()
+		raw, err = zdec.DecodeAll(raw, nil)
+		if err != nil {
+			writeErr(w, 400, "invalid_body", "zstd decode: "+err.Error(), false)
+			return
+		}
+		if int64(len(raw)) > maxBody {
+			writeErr(w, 400, "invalid_body", "decompressed batch exceeds max size", false)
+			return
+		}
 	}
 	type item struct {
 		EventID string
@@ -477,23 +649,14 @@ func (s *Server) ingestBatch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, resp)
 }
 
-func pipelineForType(t uint8) string {
-	switch t {
-	case lep.TypeHealth:
-		return "health"
-	case lep.TypeLog, lep.TypeMessage:
-		return "log"
-	case lep.TypePeripheral:
-		return "metric"
-	case lep.TypeReset:
-		return "boot"
-	case lep.TypeCrash, lep.TypeCoredump, lep.TypeError:
-		return "issue"
-	default:
-		return "issue"
-	}
+type batchRequest struct {
+	Events []struct {
+		EventID string `json:"event_id"`
+		Payload []byte `json:"payload"`
+	} `json:"events"`
 }
 
+// acceptOne validates a raw LEP envelope and persists the event.
 func (s *Server) acceptOne(r *http.Request, projectID uuid.UUID, eventID string, raw []byte) (store.IngestResult, string, string, bool, error) {
 	if int64(len(raw)) > s.Cfg.MaxEventSize {
 		return store.IngestResult{}, "too_large", "event exceeds max size", false, errors.New("too large")
@@ -539,6 +702,7 @@ func (s *Server) acceptOne(r *http.Request, projectID uuid.UUID, eventID string,
 	return res, "", "", false, nil
 }
 
+// enqueueProcess sends an event to the processing pipeline.
 func (s *Server) enqueueProcess(ctx context.Context, projectID, eventID uuid.UUID) error {
 	payload := map[string]string{
 		"event_id":   eventID.String(),
@@ -551,6 +715,7 @@ func (s *Server) enqueueProcess(ctx context.Context, projectID, eventID uuid.UUI
 	return s.Store.EnqueueJob(ctx, "process_event", payload)
 }
 
+// uploadArtifact handles artifact upload from a relay.
 func (s *Server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 	tok, err := s.requireIngest(r, "artifact:write")
 	if err != nil {
@@ -573,6 +738,7 @@ func (s *Server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 201, a)
 }
 
+// relayHeartbeat handles relay heartbeat registration.
 func (s *Server) relayHeartbeat(w http.ResponseWriter, r *http.Request) {
 	tok, err := s.requireIngest(r, "event:write")
 	if err != nil {
@@ -600,6 +766,7 @@ func (s *Server) relayHeartbeat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, rel)
 }
 
+// saveArtifact persists an artifact and returns metadata.
 func (s *Server) saveArtifact(r *http.Request, projectID uuid.UUID) (store.Artifact, error) {
 	body := http.MaxBytesReader(nil, r.Body, s.Cfg.MaxArtifactSize)
 	defer body.Close()
@@ -643,26 +810,6 @@ func (s *Server) saveArtifact(r *http.Request, projectID uuid.UUID) (store.Artif
 	return s.Store.CreateArtifact(r.Context(), projectID, "elf", meta.BuildID, meta.Architecture, hash, key, int64(len(raw)), status)
 }
 
-var errForbidden = errors.New("forbidden")
-
-// nowFunc returns the current UTC time. Tests may swap this for a fixed clock.
-var nowFunc = func() time.Time { return time.Now().UTC() }
-
-func (s *Server) requireIngest(r *http.Request, scope string) (store.Token, error) {
-	secret, err := auth.Bearer(r.Header.Get("Authorization"))
-	if err != nil {
-		return store.Token{}, err
-	}
-	tok, err := s.Store.AuthIngestToken(r.Context(), secret)
-	if err != nil {
-		return store.Token{}, err
-	}
-	if scope != "" && !store.TokenHasScope(tok, scope) {
-		return store.Token{}, errForbidden
-	}
-	return tok, nil
-}
-
 type ctxKey int
 
 const (
@@ -675,43 +822,44 @@ const (
 // endpoints are whitelisted — sensitive data (issues, events, audit logs,
 // settings, tokens) requires authentication regardless of OpenUI.
 var openUIEndpoints = map[string]bool{
-	"/api/overview":        true,
-	"/api/search":          true,
-	"/api/query/events":    true,
-	"/api/releases":        true,
-	"/api/events":          true,
-	"/api/artifacts":       true,
-	"/api/labels":          true,
-	"/api/boots":           true,
+	"/api/overview":     true,
+	"/api/search":       true,
+	"/api/query/events": true,
+	"/api/releases":     true,
+	"/api/events":       true,
+	"/api/artifacts":    true,
+	"/api/labels":       true,
+	"/api/boots":        true,
 }
 
+// requireUI enforces UI authentication and role-based access.
 func (s *Server) requireUI(next http.HandlerFunc, minRole string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// OpenUI is explicit opt-in for local/dev only.
-		// Only whitelisted endpoints are accessible without authentication.
+		// Local deployment mode: everything is unlocked. The operator running
+		// the server is implicitly trusted — no auth gate and no role check.
+		if s.Cfg.IsLocal() {
+			next(w, r)
+			return
+		}
 		if s.Cfg.OpenUI && r.Method == http.MethodGet && openUIEndpoints[r.URL.Path] {
 			next(w, r)
 			return
 		}
-
-		// Use the canonical sessionFrom defined in session.go (DB-backed).
 		sess, ok := sessionFrom(s, r)
 		if !ok {
 			writeErr(w, 401, "unauthorized", "login required", false)
 			return
 		}
-
 		if !s.userHasRole(sess, minRole) {
 			writeErr(w, 403, "forbidden", "insufficient role", false)
 			return
 		}
-
 		next(w, r.WithContext(context.WithValue(r.Context(), sessKey, sess)))
 	}
 }
 
+// project resolves the project for the current request.
 func (s *Server) project(r *http.Request) (store.Project, error) {
-	// Prefer X-Project-ID when session present (multi-tenant)
 	if sess, ok := sessionFrom(s, r); ok {
 		var pid *uuid.UUID
 		if h := r.Header.Get("X-Project-ID"); h != "" {
@@ -728,7 +876,6 @@ func (s *Server) project(r *http.Request) (store.Project, error) {
 		if err != nil {
 			return store.Project{}, err
 		}
-		// verify membership can access
 		ok, _, err := s.Store.UserCanAccessProject(r.Context(), sess.UserID, p.ID)
 		if err != nil {
 			return store.Project{}, err
@@ -738,10 +885,10 @@ func (s *Server) project(r *http.Request) (store.Project, error) {
 		}
 		return p, nil
 	}
-	// OpenUI fallback: default project only
 	return s.Store.DefaultProject(r.Context())
 }
 
+// login handles user login with account lockout protection.
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Email    string `json:"email"`
@@ -751,14 +898,10 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "invalid_json", err.Error(), false)
 		return
 	}
-	// Account lockout: prevent brute-force attacks on specific accounts.
-	// After MaxFailedLoginAttempts failed attempts within LockoutWindow,
-	// the account is locked for LockoutWindow duration.
 	const maxFailedLogins = 5
 	const lockoutWindow = 5 * time.Minute
 	s.loginLockoutMu.Lock()
 	if entry, ok := s.loginLockout[body.Email]; ok && time.Since(entry.LockedUntil) >= 0 {
-		// Lockout expired, clear it
 		delete(s.loginLockout, body.Email)
 	} else if entry, ok := s.loginLockout[body.Email]; ok && entry.LockedUntil.After(time.Now()) {
 		retryAfter := int(time.Until(entry.LockedUntil).Seconds())
@@ -775,8 +918,10 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 
 	sess, secret, err := s.Store.Login(r.Context(), body.Email, body.Password)
 	if err != nil {
-		// Record failed attempt
 		s.loginLockoutMu.Lock()
+		if s.loginLockout == nil {
+			s.loginLockout = make(map[string]loginLockoutEntry)
+		}
 		entry := loginLockoutEntry{
 			FirstFailedAt: time.Now(),
 			FailedCount:   1,
@@ -794,7 +939,6 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 401, "invalid_credentials", "invalid email or password", false)
 		return
 	}
-	// Successful login: clear lockout
 	s.loginLockoutMu.Lock()
 	delete(s.loginLockout, body.Email)
 	s.loginLockoutMu.Unlock()
@@ -807,7 +951,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	s.Store.Audit(r.Context(), &uid, nil, &oid, nil, "auth.login", "user", uid.String(), clientIP(r), r.UserAgent(), nil)
 	s.setSessionCookie(w, secret)
 	writeJSON(w, 200, map[string]any{
-		"token": secret, // also returned for non-browser API clients
+		"token": secret,
 		"user":  map[string]any{"id": sess.UserID, "email": sess.Email, "name": sess.Name, "role": sess.Role, "organization_id": sess.OrganizationID},
 	})
 }
@@ -890,7 +1034,7 @@ func (s *Server) apiIssue(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "no_project", err.Error(), false)
 		return
 	}
-	
+
 	// Ensure organization matches current session before proceeding
 	if err := s.checkOrgMatch(r, p.OrganizationID); err != nil {
 		writeErr(w, 403, "access_denied", "organization mismatch", false)
@@ -1210,7 +1354,7 @@ func (s *Server) apiCreateToken(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "no_project", err.Error(), false)
 		return
 	}
-	
+
 	// Ensure organization matches current session before proceeding
 	if err := s.checkOrgMatch(r, p.OrganizationID); err != nil {
 		writeErr(w, 403, "access_denied", "organization mismatch", false)
@@ -1245,10 +1389,10 @@ func (s *Server) apiCreateToken(w http.ResponseWriter, r *http.Request) {
 func (s *Server) apiBootstrapInfo(w http.ResponseWriter, r *http.Request) {
 	p, err := s.project(r)
 	if err != nil {
-		writeJSON(w, 200, map[string]any{"bootstrapped": false, "open_ui": s.Cfg.OpenUI})
+		writeJSON(w, 200, map[string]any{"bootstrapped": false, "open_ui": s.Cfg.OpenUI, "deployment": s.Cfg.Deployment, "billing_enabled": !s.Cfg.IsLocal()})
 		return
 	}
-	writeJSON(w, 200, map[string]any{"bootstrapped": true, "project": p, "open_ui": s.Cfg.OpenUI})
+	writeJSON(w, 200, map[string]any{"bootstrapped": true, "project": p, "open_ui": s.Cfg.OpenUI, "deployment": s.Cfg.Deployment, "billing_enabled": !s.Cfg.IsLocal()})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

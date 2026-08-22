@@ -23,6 +23,11 @@ import (
 // (which is control-plane traffic).
 func (s *Server) quotaMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Local deployment mode: everything unlocked — no quotas, no billing.
+		if s.Cfg.IsLocal() {
+			next.ServeHTTP(w, r)
+			return
+		}
 		// Require a session to enforce quotas. Unauthenticated ingest (API
 		// token based) skips quota checks — this is a known limitation;
 		// proper enforcement requires per-token quota tracking.

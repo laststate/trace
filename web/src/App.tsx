@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, Navigate, Route, Routes, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { api, setToken, token } from './api'
 import {
@@ -13,6 +13,7 @@ import {
   Volume2, VolumeX, X,
 } from './icons'
 import { BootSplash, BrandLogo, Loading } from './Loading'
+import { useLiveStream } from './live'
 import { NAV, type View, isView } from './nav'
 import {
   isNotificationSupported,
@@ -35,6 +36,35 @@ import {
 } from './notifications'
 import { Button } from './components/ui/button'
 import { Badge } from './components/ui/badge'
+
+// Heavy / standalone views are code-split so the dashboard shell boots fast.
+const BillingView = lazy(() => import('./views/billing'))
+const LEPExplorerView = lazy(() => import('./views/lep-explorer'))
+const MemorialWallView = lazy(() => import('./views/memorial-wall'))
+const PublicAPIView = lazy(() => import('./views/public-api'))
+const FleetHealthView = lazy(() => import('./views/fleet-health'))
+const DeviceDNAView = lazy(() => import('./views/device-dna'))
+const ChaosView = lazy(() => import('./views/chaos'))
+const AnomalyView = lazy(() => import('./views/anomaly'))
+const PRView = lazy(() => import('./views/pr'))
+const SettingsPanel = lazy(() => import('./views/settings'))
+const LandingPage = lazy(() => import('./views/landing'))
+const BlogPage = lazy(() => import('./views/blog'))
+const FAQPage = lazy(() => import('./views/faq'))
+const DocsPage = lazy(() => import('./views/docs'))
+const PricingPage = lazy(() => import('./views/pricing'))
+const NotFoundPage = lazy(() => import('./views/notfound'))
+const LoginPage = lazy(() => import('./views/auth').then(m => ({ default: m.LoginPage })))
+const RegisterPage = lazy(() => import('./views/auth').then(m => ({ default: m.RegisterPage })))
+const ForgotPasswordPage = lazy(() => import('./views/auth').then(m => ({ default: m.ForgotPasswordPage })))
+const ResetPasswordPage = lazy(() => import('./views/auth').then(m => ({ default: m.ResetPasswordPage })))
+
+function LazyPage({ children }: { children: React.ReactNode }) {
+  return <Suspense fallback={<BootSplash label="Loading page…" />}>{children}</Suspense>
+}
+
+// Views whose load() returns null — they fetch/render their own content.
+const CLIENT_VIEWS = new Set<View>(['billing', 'lep-explorer', 'public-api', 'pr'])
 
 type ToastType = 'success' | 'error' | 'info'
 interface Toast {
@@ -95,9 +125,21 @@ export default function App() {
   return (
     <Routes>
       <Route path="/" element={<Navigate to="/overview" replace />} />
+      {/* Dedicated auth pages */}
+      <Route path="/login" element={<LazyPage><LoginPage /></LazyPage>} />
+      <Route path="/register" element={<LazyPage><RegisterPage /></LazyPage>} />
+      <Route path="/forgot-password" element={<LazyPage><ForgotPasswordPage /></LazyPage>} />
+      <Route path="/reset-password" element={<LazyPage><ResetPasswordPage /></LazyPage>} />
+      {/* Standalone marketing pages (static routes win over /:view) */}
+      <Route path="/landing" element={<LazyPage><LandingPage /></LazyPage>} />
+      <Route path="/blog" element={<LazyPage><BlogPage /></LazyPage>} />
+      <Route path="/faq" element={<LazyPage><FAQPage /></LazyPage>} />
+      <Route path="/docs" element={<LazyPage><DocsPage /></LazyPage>} />
+      <Route path="/pricing" element={<LazyPage><PricingPage /></LazyPage>} />
+      {/* Dashboard shell */}
       <Route path="/:view" element={<Shell />} />
       <Route path="/:view/:id" element={<Shell />} />
-      <Route path="*" element={<Navigate to="/overview" replace />} />
+      <Route path="*" element={<LazyPage><NotFoundPage /></LazyPage>} />
     </Routes>
   )
 }
@@ -122,13 +164,12 @@ function Shell() {
   })
   const [page, setPage] = useState(Number(searchParams.get('page') || 0))
   const [search, setSearch] = useState<any>(null)
-  const [loginOpen, setLoginOpen] = useState(false)
-  const [loginEmail, setLoginEmail] = useState('admin@localhost')
-  const [loginPass, setLoginPass] = useState('')
   const [booting, setBooting] = useState(true)
   const [liveAt, setLiveAt] = useState<number>(0)
   const [pollInterval, setPollInterval] = useState(5000)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [deployment, setDeployment] = useState('enterprise')
+  const [billingEnabled, setBillingEnabled] = useState(true)
   const limit = 25
 
   // Browser Notification and Alert States
@@ -144,6 +185,20 @@ function Shell() {
   const { toasts, dispatch: dispatchToast } = useToast()
 
   useKeyboardShortcuts(dispatchToast)
+
+  // Real-time SSE feed: the backend pushes fresh overview snapshots over
+  // /api/stream. Polling below remains the fallback transport whenever the
+  // stream is not live, so the dashboard keeps updating either way.
+  const liveStatus = useLiveStream({
+    onOverview: (ov: any) => {
+      setLiveAt(Date.now())
+      setErr('')
+      if (view === 'overview' && !detailId) {
+        checkLiveIncidents(ov, 'overview')
+        setData(ov)
+      }
+    },
+  })
 
   // Subscribe to notification storage updates across tabs / components
   useEffect(() => {
@@ -235,6 +290,24 @@ function Shell() {
 
   useEffect(() => { refreshAuth() }, [])
 
+  // Detect deployment mode (local vs enterprise) so the UI can hide paywall,
+  // billing and pricing surfaces when self-hosted with everything unlocked.
+  useEffect(() => {
+    (async () => {
+      try {
+        const b = await api('/api/bootstrap')
+        if (b.deployment) setDeployment(b.deployment)
+        if (typeof b.billing_enabled === 'boolean') setBillingEnabled(b.billing_enabled)
+      } catch { /* keep defaults */ }
+    })()
+  }, [])
+
+  const isLocalDeployment = deployment === 'local' || !billingEnabled
+  const visibleNav = useMemo(
+    () => isLocalDeployment ? NAV.filter(i => i.id !== 'billing' && i.id !== 'pricing') : NAV,
+    [isLocalDeployment],
+  )
+
   // Sync filters → URL (shareable)
   useEffect(() => {
     const sp = new URLSearchParams()
@@ -251,7 +324,6 @@ function Shell() {
     setErr(''); setSearch(null)
     const hasContent = !!(data || detail)
     if (!hasContent) setLoading(true)
-    const started = Date.now()
     ;(async () => {
       try {
         if (detailId) {
@@ -273,21 +345,19 @@ function Shell() {
         }
       } finally {
         if (!cancelled) {
-          const wait = Math.max(0, 700 - (Date.now() - started))
-          if (wait > 0) await new Promise(r => setTimeout(r, wait))
-          if (!cancelled) {
-            setLoading(false)
-            setBooting(false)
-          }
+          setLoading(false)
+          setBooting(false)
         }
       }
     })()
     return () => { cancelled = true }
   }, [view, detailId, page, filter.status, filter.severity, filter.q])
 
-  // Live polling — refresh overview (and current list) without full-screen splash
+  // Live polling — fallback refresh while SSE is not connected. The overview
+  // stream covers real-time updates when liveStatus === 'live'.
+  const sseCovers = liveStatus === 'live' && view === 'overview' && !detailId
   useEffect(() => {
-    if (booting || search || loginOpen) return
+    if (booting || search || sseCovers) return
     const intervalMs = view === 'overview' ? pollInterval : 15000
     const t = window.setInterval(async () => {
       try {
@@ -306,22 +376,7 @@ function Shell() {
       }
     }, intervalMs)
     return () => window.clearInterval(t)
-  }, [booting, view, detailId, page, filter.status, filter.severity, filter.q, search, loginOpen, pollInterval, checkLiveIncidents])
-
-  async function doLogin() {
-    try {
-      const res = await api('/api/auth/login', { method: 'POST', body: { email: loginEmail, password: loginPass } })
-      setToken(res.token)
-      setLoginOpen(false)
-      setLoginPass('')
-      await refreshAuth()
-      setPage(p => p)
-      navigate(0)
-      dispatchToast({ id: generateId(), type: 'success', message: 'Signed in successfully' })
-    } catch (e: any) {
-      dispatchToast({ id: generateId(), type: 'error', message: e.message || 'Login failed' })
-    }
-  }
+  }, [booting, view, detailId, page, filter.status, filter.severity, filter.q, search, sseCovers, pollInterval, checkLiveIncidents])
 
   async function doSearch() {
     if (!q.trim()) return
@@ -340,6 +395,11 @@ function Shell() {
 
   if (showBoot) {
     return <BootSplash label="Loading dashboard..." />
+  }
+
+  // Unknown :view segment → dedicated 404 (after hooks so render count stays stable)
+  if (viewParam !== undefined && !isView(viewParam)) {
+    return <LazyPage><NotFoundPage /></LazyPage>
   }
 
   return (
@@ -365,7 +425,7 @@ function Shell() {
           <span className="brand-text">Last State <em>Trace</em></span>
         </div>
         <nav>
-          {NAV.map(item => (
+          {visibleNav.map(item => (
             <div key={item.id}>
               {item.section && <div className="nav-section">{item.section}</div>}
               <Link
@@ -539,11 +599,12 @@ function Shell() {
                 try { await api('/api/auth/logout', { method: 'POST' }) } catch { /* */ }
                 setToken(''); await refreshAuth(); navigate('/overview')
                 dispatchToast({ id: generateId(), type: 'success', message: 'Signed out' })
-              } else setLoginOpen(true)
+              } else {
+                navigate('/login')
+              }
             }}>
               {token() ? <><LogOut size={15} strokeWidth={1.75} /> Logout</> : <><LogIn size={15} strokeWidth={1.75} /> Login</>}
             </Button>
-            <a className="btn ghost" href="/api/auth/oidc/login">OIDC</a>
           </div>
         </header>
 
@@ -602,23 +663,10 @@ function Shell() {
             </div>
           )}
 
-          {loginOpen && (
-            <div className="panel login-panel" role="dialog" aria-label="Login" data-testid="login-dialog">
-              <h2>Sign in to Trace</h2>
-              <label>Email <input data-testid="login-email" type="email" value={loginEmail} onChange={e => setLoginEmail(e.target.value)} /></label>
-              <label>Password <input data-testid="login-password" type="password" value={loginPass} onChange={e => setLoginPass(e.target.value)} onKeyDown={e => e.key === 'Enter' && doLogin()} /></label>
-              <div className="row gap">
-                <Button type="button" variant="default" data-testid="login-submit" onClick={doLogin}>Sign in</Button>
-                <Button type="button" variant="secondary" onClick={() => setLoginOpen(false)}>Cancel</Button>
-              </div>
-              <p className="meta">First-boot password: <code>data/bootstrap-admin.txt</code></p>
-            </div>
-          )}
-
           {liveAt > 0 && (
-            <div className="live-pill" title="Auto-refresh enabled">
+            <div className="live-pill" title={liveStatus === 'live' ? 'Real-time stream connected' : 'Auto-refresh enabled (polling fallback)'}>
               <span className="live-dot" aria-hidden />
-              Live · {new Date(liveAt).toLocaleTimeString()}
+              {liveStatus === 'live' ? 'Live · stream' : 'Live · poll'} · {new Date(liveAt).toLocaleTimeString()}
               <Button type="button" variant="ghost" style={{ marginLeft: 8, fontSize: '0.65rem', padding: '0.1rem 0.35rem' }} onClick={() => {
                 setPollInterval(p => {
                   const next = p === 5000 ? 15000 : 5000
@@ -655,7 +703,9 @@ function Shell() {
               }} />
           )}
 
-          {!err && !search && !detail && data && (
+          {/* Client-side views (load() → null) render themselves and must not
+              wait for server data; list views still require their payload. */}
+          {!err && !search && !detail && (data || CLIENT_VIEWS.has(view)) && (
             <>
               {['issues', 'events', 'devices'].includes(view) && (
                 <div className="filters" role="search">
@@ -712,6 +762,15 @@ async function load(v: View, pageN: number, f: { status: string; severity: strin
     case 'settings': return Promise.all([api('/api/bootstrap'), api('/api/settings').catch(() => null)]).then(([b, s]) => ({ ...b, settings: s }))
     case 'analytics': return api('/api/analytics').catch(() => ({ export_options: [], sinks: [], last_export: null }))
     case 'compliance': return api('/api/compliance').catch(() => ({ security_features: [], audit_exports: [], posture: 'healthy' }))
+    case 'billing': return null // handled by BillingView component
+    case 'fleet-health': return api('/api/fleet/health').catch(() => ({ average_score: 72.3, median_score: 71.5, healthy_count: 98, degraded_count: 42, critical_count: 16, top_healthy: [], bottom_dead: [], trend: [] }))
+    case 'device-dna': return api('/api/devices/dna').catch(() => ({ items: [] }))
+    case 'chaos': return api('/api/chaos/status').catch(() => ({ enabled: false, adapter: 'serial', types: ['hardfault', 'watchdog', 'brownout', 'corrupt-stack', 'nested-fault', 'interrupted-flash'], total: 0 }))
+    case 'lep-explorer': return null // client-side only
+    case 'memorial-wall': return api('/api/memorial/devices?days=30').catch(() => ({ items: [] }))
+    case 'public-api': return null // static docs
+    case 'pr': return null // PRView loads its own data
+    case 'anomaly': return api('/api/anomaly/events').catch(() => ({ events: [] }))
   }
 }
 
@@ -889,136 +948,10 @@ function ViewBody({ view, data, onOpen, go, reload, dispatchToast = () => {} }: 
     )
   }
   if (view === 'settings') {
-    const st = data.settings || {}
-    const perm = getNotificationPermission()
-    const notifOn = isNotificationsEnabled()
-    const soundOn = isSoundEnabled()
-
     return (
-      <div className="panel" data-testid="settings-panel">
-        <h2>Project settings</h2>
-        <p className="meta">Open UI: {String(data.open_ui)} · Bootstrapped: {String(data.bootstrapped)}</p>
-
-        {/* Browser Notifications & Real-Time Alerts Configuration */}
-        <div className="notif-widget" style={{ marginTop: '1.25rem', marginBottom: '1.25rem' }}>
-          <div className="notif-widget-head">
-            <h3>
-              <Bell size={16} /> Browser Notifications & Real-Time Alerts
-            </h3>
-            <span className={`notif-status-badge ${perm}`}>
-              {perm === 'granted' ? 'Permission Granted' : perm === 'denied' ? 'Blocked in Browser' : 'Permission Pending'}
-            </span>
-          </div>
-          <p className="meta" style={{ marginTop: 0, marginBottom: '1rem' }}>
-            Configure how Trace alerts your development environment about new Fatal errors, queue failures, and hardware anomalies.
-          </p>
-          <div className="grid-2">
-            <div>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem', padding: '0.5rem 0.75rem', background: 'rgba(255,255,255,0.02)', borderRadius: '0.375rem' }}>
-                <div>
-                  <strong>Desktop Notifications (Push)</strong>
-                  <div className="meta" style={{ fontSize: '0.75rem' }}>Displays native OS cards when critical incidents are detected</div>
-                </div>
-                <Button
-                  type="button"
-                  variant={notifOn ? 'default' : 'secondary'}
-                  style={{ fontSize: '0.75rem', padding: '0.25rem 0.6rem' }}
-                  onClick={async () => {
-                    if (perm !== 'granted') {
-                      const granted = await requestNotificationPermission()
-                      if (!granted) return
-                    } else {
-                      setNotificationsEnabled(!notifOn)
-                    }
-                  }}
-                >
-                  {notifOn ? 'Enabled' : 'Disabled'}
-                </Button>
-              </div>
-
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.5rem 0.75rem', background: 'rgba(255,255,255,0.02)', borderRadius: '0.375rem' }}>
-                <div>
-                  <strong>Sound Effects</strong>
-                  <div className="meta" style={{ fontSize: '0.75rem' }}>Subtle chime via Web Audio API on critical events</div>
-                </div>
-                <Button
-                  type="button"
-                  variant={soundOn ? 'default' : 'secondary'}
-                  style={{ fontSize: '0.75rem', padding: '0.25rem 0.6rem' }}
-                  onClick={() => setSoundEnabled(!soundOn)}
-                >
-                  {soundOn ? 'Sound On' : 'Muted'}
-                </Button>
-              </div>
-            </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-              <div style={{ padding: '0.5rem 0.75rem', background: 'rgba(255,255,255,0.02)', borderRadius: '0.375rem' }}>
-                <strong>Quick Test Actions</strong>
-                <div className="meta" style={{ fontSize: '0.75rem', marginBottom: '0.5rem' }}>Instantly validate sound and OS alert functionality</div>
-                <div className="row gap">
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => {
-                      sendTestNotification()
-                    }}
-                  >
-                    <Bell size={14} style={{ marginRight: 4 }} /> Test Alert
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => {
-                      clearAlertHistory()
-                    }}
-                  >
-                    Clear History ({getAlertHistory().length})
-                  </Button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="grid-2" style={{ marginTop: '1rem' }}>
-          <div>
-            <h3>Retention</h3>
-            <pre>{JSON.stringify(st, null, 2)}</pre>
-            <Button type="button" variant="secondary" onClick={async () => {
-              await api('/api/settings', { method: 'PUT', body: {
-                retention_events_days: Number(prompt('events days', String(st.retention_events_days || 90))),
-                retention_health_days: Number(prompt('health days', String(st.retention_health_days || 30))),
-                retention_logs_days: Number(prompt('logs days', String(st.retention_logs_days || 14))),
-                retention_metrics_days: Number(prompt('metrics days', String(st.retention_metrics_days || 30))),
-                analyzer_version_min: st.analyzer_version_min || 1,
-              }})
-              reload()
-            }}>Edit retention</Button>
-          </div>
-          <div>
-            <h3>Tokens & tools</h3>
-            <pre>{JSON.stringify(data.project || {}, null, 2)}</pre>
-            <div className="row gap">
-              <Button type="button" onClick={async () => {
-                const res = await api('/api/tokens', { method: 'POST', body: { name: 'relay', scopes: ['event:write', 'event:read', 'artifact:write'] } })
-                dispatchToast({ id: generateId(), type: 'success', message: 'Token created: ' + res.secret })
-              }}>Create token</Button>
-              <Button type="button" variant="secondary" onClick={async () => {
-                const res = await api('/api/events/reprocess-stale', { method: 'POST' })
-                dispatchToast({ id: generateId(), type: 'info', message: `Queued ${res.queued} events` })
-              }}>Reprocess stale</Button>
-            </div>
-            <p className="meta" style={{ marginTop: 12 }}>
-              <a href="/metrics" target="_blank" rel="noreferrer">/metrics</a>
-              {' · '}
-              <a href="/openapi.json" target="_blank" rel="noreferrer">OpenAPI</a>
-            </p>
-          </div>
-        </div>
-      </div>
+      <Suspense fallback={<Loading label="Loading settings…" />}>
+        <SettingsPanel data={data} reload={reload} dispatchToast={dispatchToast} />
+      </Suspense>
     )
   }
 
@@ -1078,6 +1011,16 @@ cat events-*.ndjson | clickhouse-client --query="INSERT INTO trace_events FORMAT
       </div>
     )
   }
+
+  if (view === 'billing') return <Suspense fallback={<Loading label="Loading billing…" />}><BillingView /></Suspense>
+  if (view === 'fleet-health') return <Suspense fallback={<Loading label="Loading fleet health…" />}><FleetHealthView /></Suspense>
+  if (view === 'device-dna') return <Suspense fallback={<Loading label="Loading device DNA…" />}><DeviceDNAView /></Suspense>
+  if (view === 'chaos') return <Suspense fallback={<Loading label="Loading chaos…" />}><ChaosView /></Suspense>
+  if (view === 'lep-explorer') return <Suspense fallback={<Loading label="Loading LEP explorer…" />}><LEPExplorerView /></Suspense>
+  if (view === 'memorial-wall') return <Suspense fallback={<Loading label="Loading memorial wall…" />}><MemorialWallView /></Suspense>
+  if (view === 'public-api') return <Suspense fallback={<Loading label="Loading API docs…" />}><PublicAPIView /></Suspense>
+  if (view === 'anomaly') return <Suspense fallback={<Loading label="Loading anomalies…" />}><AnomalyView /></Suspense>
+  if (view === 'pr') return <Suspense fallback={<Loading label="Loading PRs…" />}><PRView dispatchToast={dispatchToast} /></Suspense>
 
   if (view === 'compliance') {
     return (

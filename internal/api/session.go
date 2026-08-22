@@ -55,6 +55,12 @@ func sessionFrom(s *Server, r *http.Request) (store.Session, bool) {
 // Used on routes that need auth but not a UI role check.
 func (s *Server) requireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Local deployment mode: the operator running the server is trusted,
+		// so authentication is not required on any route.
+		if s.Cfg.IsLocal() {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if _, ok := sessionFrom(s, r); !ok {
 			writeErr(w, 401, "unauthorized", "authentication required", false)
 			return

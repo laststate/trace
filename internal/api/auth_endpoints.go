@@ -4,9 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/google/uuid"
 	"github.com/laststate/trace/internal/auth"
-	"github.com/laststate/trace/internal/store"
 )
 
 // apiSignup handles user signup with email verification.
@@ -28,39 +26,7 @@ func (s *Server) apiSignup(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "bad_request", "password must be at least 12 characters", false)
 		return
 	}
-	// Use the existing CreateUser which requires orgID. For self-service signup,
-	// we need to create the user first, then they can create/join an org.
-	// For now, we'll use a placeholder orgID (will be fixed in production).
-	user, err := s.Store.CreateUser(r.Context(), uuid.Nil, body.Email, body.Password, body.Name, "developer")
-	if err != nil {
-		writeErr(w, 500, "internal", err.Error(), true)
-		return
-	}
-	// Generate verification token.
-	verifyToken, err := store.GenerateVerifyToken()
-	if err != nil {
-		writeErr(w, 500, "internal", err.Error(), true)
-		return
-	}
-	// Store verification token.
-	_, err = s.Store.Pool.Exec(r.Context(), `
-INSERT INTO verification_tokens(user_id, token, expires_at)
-VALUES ($1, $2, now() + interval '1 hour')`, user.ID, verifyToken)
-	if err != nil {
-		writeErr(w, 500, "internal", err.Error(), true)
-		return
-	}
-	// Send verification email (or log if SMTP not configured).
-	if err := s.Mailer.SendVerificationEmail(r.Context(), user.Email, verifyToken); err != nil {
-		s.Log.Warn("failed to send verification email", "email", user.Email, "error", err)
-	}
-	writeJSON(w, 201, map[string]any{
-		"user_id":       user.ID,
-		"email":         user.Email,
-		"name":          user.Name,
-		"verified":      false,
-		"verify_token":  verifyToken, // In production, this would not be returned.
-	})
+	writeErr(w, http.StatusNotImplemented, "signup_unavailable", "self-service signup requires the organization provisioning flow; use an invitation", false)
 }
 
 // apiVerifyEmail handles email verification.
@@ -112,7 +78,7 @@ func (s *Server) apiForgotPassword(w http.ResponseWriter, r *http.Request) {
 // apiResetPassword handles password reset with token.
 func (s *Server) apiResetPassword(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Token      string `json:"token"`
+		Token       string `json:"token"`
 		NewPassword string `json:"new_password"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -163,7 +129,7 @@ func (s *Server) apiMfaEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{
-		"secret": secret,
+		"secret":  secret,
 		"message": "Add this secret to your authenticator app and verify the code",
 	})
 }

@@ -14,6 +14,9 @@ const (
 	MaxEnvelopeSize = lep.MaxEnvelopeSize
 	Magic           = lep.Magic
 	Version1        = lep.Version1
+	Version2        = lep.Version2
+	MinVersion      = lep.MinVersion
+	CurrentVersion  = lep.CurrentVersion
 
 	FlagAuthenticated = lep.FlagAuthenticated
 	FlagEncrypted     = lep.FlagEncrypted

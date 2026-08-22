@@ -17,17 +17,17 @@ type OnboardingStep struct {
 
 // OnboardingStatus represents the onboarding status for a user.
 type OnboardingStatus struct {
-	UserID   uuid.UUID    `json:"user_id"`
+	UserID   uuid.UUID        `json:"user_id"`
 	Steps    []OnboardingStep `json:"steps"`
-	Progress float64      `json:"progress"` // 0.0 to 1.0
+	Progress float64          `json:"progress"` // 0.0 to 1.0
 }
 
 // OnboardingProgress represents the onboarding progress for a user.
 type OnboardingProgress struct {
-	UserID      uuid.UUID `json:"user_id"`
-	Completed   int       `json:"completed"`
-	Total       int       `json:"total"`
-	Percentage  float64   `json:"percentage"` // 0 to 100
+	UserID     uuid.UUID `json:"user_id"`
+	Completed  int       `json:"completed"`
+	Total      int       `json:"total"`
+	Percentage float64   `json:"percentage"` // 0 to 100
 }
 
 // GetOnboardingStatus returns the onboarding status for a user.

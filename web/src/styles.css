@@ -1860,3 +1860,83 @@ input:focus-visible, select:focus-visible, .nav-link:focus-visible {
   transform: translateY(0);
   transition: opacity 0.3s, transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
+
+/* ===== Settings forms ===== */
+.settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  max-width: 340px;
+}
+
+.settings-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: hsl(0 0% 64%);
+}
+
+.settings-form input {
+  background: hsl(0 0% 10%);
+  border: 1px solid hsl(0 0% 12%);
+  border-radius: 0.375rem;
+  color: hsl(0 0% 96%);
+  padding: 0.45rem 0.65rem;
+  font-size: 0.88rem;
+  outline: none;
+}
+
+.settings-form input:focus {
+  border-color: hsl(262 62% 69%);
+  box-shadow: 0 0 0 3px hsl(262 62% 69% / 0.15);
+}
+
+.settings-form button {
+  align-self: flex-start;
+}
+
+/* ===== Crash-to-PR view ===== */
+.pr-create-form {
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  margin-top: 0.75rem;
+}
+
+.pr-create-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: hsl(0 0% 64%);
+}
+
+.pr-create-form input {
+  background: hsl(0 0% 10%);
+  border: 1px solid hsl(0 0% 12%);
+  border-radius: 0.375rem;
+  color: hsl(0 0% 96%);
+  padding: 0.45rem 0.65rem;
+  font-size: 0.85rem;
+  min-width: 220px;
+  outline: none;
+}
+
+.pr-create-form input:focus {
+  border-color: hsl(262 62% 69%);
+  box-shadow: 0 0 0 3px hsl(262 62% 69% / 0.15);
+}
+
+/* ===== 404 ===== */
+.nf-code {
+  font-size: 3.5rem;
+  font-weight: 700;
+  color: hsl(262 62% 69%);
+  letter-spacing: 0.05em;
+  line-height: 1;
+  margin: 0 0 0.5rem;
+}

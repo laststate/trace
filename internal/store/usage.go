@@ -20,10 +20,10 @@ type UsageCounter struct {
 // UsageKind constants. Keep these in sync with the kinds the quota middleware
 // emits so dashboards and limits stay aligned.
 const (
-	UsageKindEvents    = "events"
-	UsageKindAPICalls  = "api_calls"
-	UsageKindReleases  = "releases"
-	UsageKindIssues    = "issues"
+	UsageKindEvents     = "events"
+	UsageKindAPICalls   = "api_calls"
+	UsageKindReleases   = "releases"
+	UsageKindIssues     = "issues"
 	UsageKindAlertsFire = "alerts_fired"
 )
 
@@ -69,12 +69,12 @@ WHERE organization_id=$1 AND period_start=$2 AND kind=$3`,
 // UsageSummary is what /api/me/usage returns — one entry per known kind plus
 // the plan tier and remaining headroom.
 type UsageSummary struct {
-	OrganizationID uuid.UUID         `json:"organization_id"`
-	PlanTier       string            `json:"plan_tier"`
-	PeriodStart    time.Time         `json:"period_start"`
-	Counters       []UsageCounter    `json:"counters"`
-	Limits         map[string]int64  `json:"limits"`
-	Unlimited      map[string]bool   `json:"unlimited"`
+	OrganizationID uuid.UUID        `json:"organization_id"`
+	PlanTier       string           `json:"plan_tier"`
+	PeriodStart    time.Time        `json:"period_start"`
+	Counters       []UsageCounter   `json:"counters"`
+	Limits         map[string]int64 `json:"limits"`
+	Unlimited      map[string]bool  `json:"unlimited"`
 }
 
 // UsageSummary builds a JSON summary for /api/me/usage.

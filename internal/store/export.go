@@ -12,19 +12,19 @@ import (
 
 // WebhookExport represents a data export.
 type WebhookExport struct {
-	ID             uuid.UUID    `json:"id"`
-	OrganizationID uuid.UUID    `json:"organization_id"`
-	ProjectID      *uuid.UUID   `json:"project_id,omitempty"`
-	Kind           string       `json:"kind"`
+	ID             uuid.UUID      `json:"id"`
+	OrganizationID uuid.UUID      `json:"organization_id"`
+	ProjectID      *uuid.UUID     `json:"project_id,omitempty"`
+	Kind           string         `json:"kind"`
 	Filters        map[string]any `json:"filters"`
-	ObjectKey      string       `json:"object_key,omitempty"`
-	SizeBytes      int64        `json:"size_bytes"`
-	RowsCount      int64        `json:"rows_count"`
-	Status         string       `json:"status"`
-	Error          string       `json:"error,omitempty"`
-	CreatedBy      uuid.UUID    `json:"created_by"`
-	CreatedAt      time.Time    `json:"created_at"`
-	CompletedAt    *time.Time   `json:"completed_at,omitempty"`
+	ObjectKey      string         `json:"object_key,omitempty"`
+	SizeBytes      int64          `json:"size_bytes"`
+	RowsCount      int64          `json:"rows_count"`
+	Status         string         `json:"status"`
+	Error          string         `json:"error,omitempty"`
+	CreatedBy      uuid.UUID      `json:"created_by"`
+	CreatedAt      time.Time      `json:"created_at"`
+	CompletedAt    *time.Time     `json:"completed_at,omitempty"`
 }
 
 // CreateExport creates a new export record.
