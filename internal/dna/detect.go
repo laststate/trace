@@ -169,17 +169,23 @@ func (m *Manager) DetectClones(ctx context.Context) ([]*SimilarityResult, error)
 	return clones, nil
 }
 
-// compareDNAs computes similarity between two device DNAs.
+// compareDNAs computes similarity between two device DNAs. The pair is
+// reported in lexicographic device-ID order so results are deterministic
+// regardless of the underlying store's listing order.
 func compareDNAs(dna1, dna2 *DeviceDNA, threshold float64) *SimilarityResult {
+	first, second := dna1, dna2
+	if second.DeviceID < first.DeviceID {
+		first, second = second, first
+	}
 	result := &SimilarityResult{
-		Device1ID:  dna1.DeviceID,
-		Device2ID:  dna2.DeviceID,
+		Device1ID:  first.DeviceID,
+		Device2ID:  second.DeviceID,
 		Similarity: 0,
 		Reasons:    make([]string, 0),
 	}
 
-	// Boot time similarity (weight: 30%)
-	bootSim := 1.0 - math.Abs(dna1.BootTimeAvg-dna2.BootTimeAvg)/(dna1.BootTimeAvg+1)
+	// Boot time similarity (weight: 30%) — symmetric denominator
+	bootSim := 1.0 - math.Abs(dna1.BootTimeAvg-dna2.BootTimeAvg)/(math.Max(dna1.BootTimeAvg, dna2.BootTimeAvg)+1)
 	bootSim = math.Max(0, math.Min(1, bootSim))
 	result.Reasons = append(result.Reasons, fmt.Sprintf("Boot time: %.1f%% similar", bootSim*100))
 
