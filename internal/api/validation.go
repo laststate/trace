@@ -3,6 +3,7 @@ package api
 import (
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -128,43 +129,39 @@ func ValidateURL(u string) bool {
 	if len(u) == 0 || len(u) > 2048 {
 		return false
 	}
-	// Block internal/private networks
-	privateIPs := []string{
-		"127.0.0.1",
-		"0.0.0.0",
-		"localhost",
-		"::1",
-		"10.",
-		"172.16.",
-		"172.17.",
-		"172.18.",
-		"172.19.",
-		"172.20.",
-		"172.21.",
-		"172.22.",
-		"172.23.",
-		"172.24.",
-		"172.25.",
-		"172.26.",
-		"172.27.",
-		"172.28.",
-		"172.29.",
-		"172.30.",
-		"172.31.",
-		"192.168.",
-	}
-	for _, prefix := range privateIPs {
-		if strings.HasPrefix(u, prefix) {
+	uLower := strings.ToLower(u)
+	// Block dangerous schemes
+	blockedSchemes := []string{"file://", "gopher://", "ftp://", "expect://", "php://", "data://", "javascript:"}
+	for _, s := range blockedSchemes {
+		if strings.HasPrefix(uLower, s) {
 			return false
 		}
 	}
-	// Block file:// protocol
-	if strings.HasPrefix(u, "file://") {
+	// Parse URL and validate host against private networks
+	parsed, err := url.Parse(u)
+	if err != nil {
 		return false
 	}
-	// Block gopher:// protocol (known exploit vector)
-	if strings.HasPrefix(u, "gopher://") {
+	host := parsed.Hostname()
+	if host == "" {
 		return false
+	}
+	// Check hostname against blocklist (handles userinfo bypass like http://example.com@10.0.0.1/)
+	hLower := strings.ToLower(host)
+	if hLower == "localhost" || hLower == "0.0.0.0" || hLower == "::1" {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
+			return false
+		}
+	}
+	// Also block private prefixes on hostname string for non-IP hosts that start with private pattern
+	privatePrefixes := []string{"10.", "192.168.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.", "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31."}
+	for _, p := range privatePrefixes {
+		if strings.HasPrefix(hLower, p) {
+			return false
+		}
 	}
 	return true
 }
@@ -318,12 +315,27 @@ func ValidatePath(path string) bool {
 	if len(path) == 0 || len(path) > 2048 {
 		return false
 	}
-	// Block path traversal
-	if strings.Contains(path, "..") {
+	// Decode percent-encoding to catch bypasses like %2e%2e, %252e
+	decoded := path
+	for i := 0; i < 3; i++ {
+		prev := decoded
+		if d, err := url.PathUnescape(decoded); err == nil {
+			decoded = d
+		}
+		if decoded == prev {
+			break
+		}
+	}
+	// Block path traversal on decoded path
+	if strings.Contains(decoded, "..") {
 		return false
 	}
-	// Block null bytes
-	if strings.Contains(path, "\x00") {
+	// Block null bytes (raw and encoded)
+	if strings.Contains(path, "\x00") || strings.Contains(decoded, "\x00") {
+		return false
+	}
+	// Also block encoded null
+	if strings.Contains(strings.ToLower(path), "%00") {
 		return false
 	}
 	return true
