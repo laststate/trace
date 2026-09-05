@@ -228,10 +228,15 @@ func Load() Config {
 	if c.SMTPHost != "" && c.SMTPSecure == "" {
 		c.SMTPSecure = "tls"
 	}
-	if env("TRACE_COOKIE_SECURE", "") != "" {
-		c.CookieSecure = env("TRACE_COOKIE_SECURE", "false") == "true"
+	if v := strings.TrimSpace(os.Getenv("TRACE_COOKIE_SECURE")); v != "" {
+		c.CookieSecure = v == "true" || v == "1"
 	} else {
 		c.CookieSecure = strings.HasPrefix(strings.ToLower(c.PublicURL), "https://")
+		// In production, default to Secure cookies even if PublicURL not set to https
+		// (common when TLS is terminated at reverse proxy)
+		if !c.CookieSecure && (strings.EqualFold(env("TRACE_ENV", ""), "production") || strings.EqualFold(env("TRACE_ENV", ""), "prod")) {
+			c.CookieSecure = true
+		}
 	}
 	return c
 }
@@ -293,6 +298,31 @@ func (c Config) ValidateProduction() ([]ValidationWarning, error) {
 		if len(keyBytes) != 32 {
 			return warnings, fmt.Errorf("TRACE_SECRETS_KEY must be 32 bytes (got %d)", len(keyBytes))
 		}
+		// Reject placeholder / dev secrets in production
+		placeholders := []string{"changeme", "super-secret", "devlocal", "example", "placeholder"}
+		lower := strings.ToLower(c.SecretsKey)
+		for _, p := range placeholders {
+			if strings.Contains(lower, p) {
+				return warnings, fmt.Errorf("TRACE_SECRETS_KEY contains placeholder value (%q) — generate with: openssl rand -hex 32", p)
+			}
+		}
+	}
+	// Reject placeholder JWT / bootstrap secrets in production
+	if c.SecretsKey != "" || true {
+		placeholderChecks := map[string]string{
+			"TRACE_JWT_SECRET":      os.Getenv("TRACE_JWT_SECRET"),
+			"TRACE_BOOTSTRAP_TOKEN": os.Getenv("TRACE_BOOTSTRAP_TOKEN"),
+		}
+		for k, v := range placeholderChecks {
+			lv := strings.ToLower(v)
+			if v != "" && (strings.Contains(lv, "super-secret") || strings.Contains(lv, "changeme") || strings.Contains(lv, "devlocal123") || strings.Contains(lv, "fullsecrettokenforlocaldev")) {
+				return warnings, fmt.Errorf("%s contains placeholder dev value — must be overridden in production", k)
+			}
+		}
+	}
+	// In production, require strong admin password
+	if c.AdminPassword != "" && len(c.AdminPassword) < 12 {
+		return warnings, fmt.Errorf("TRACE_ADMIN_PASSWORD must be at least 12 characters in production")
 	}
 
 	if c.modeWasCorrected {
