@@ -16,6 +16,10 @@ func TestSCIMRequiresSession(t *testing.T) {
 		{"POST", "/scim/v2/Users"},
 		{"GET", "/scim/v2/Users/" + uuid.NewString()},
 		{"DELETE", "/scim/v2/Users/" + uuid.NewString()},
+		{"GET", "/scim/v2/Groups"},
+		{"POST", "/scim/v2/Groups"},
+		{"GET", "/scim/v2/Groups/" + uuid.NewString()},
+		{"DELETE", "/scim/v2/Groups/" + uuid.NewString()},
 	} {
 		rr := httptest.NewRecorder()
 		req := httptest.NewRequest(tc.method, tc.path, nil)

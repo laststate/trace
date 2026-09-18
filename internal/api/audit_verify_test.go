@@ -31,6 +31,14 @@ func (a *auditVerifyTestStore) UserIsMemberOfOrg(ctx context.Context, userID, or
 	return true, nil
 }
 
+func (a *auditVerifyTestStore) TouchSession(ctx context.Context, sessionID uuid.UUID, ip, userAgent string) error {
+	return nil
+}
+
+func (a *auditVerifyTestStore) RevokeSession(ctx context.Context, sessionID, userID uuid.UUID) error {
+	return nil
+}
+
 func TestAuditVerify_RequiresAuth(t *testing.T) {
 	s := &Server{}
 	rr := httptest.NewRecorder()

@@ -62,3 +62,13 @@ Latch LEP → Relay → POST /v1/ingest
   → issue (+ notify)
   → UI APIs
 ```
+
+### Sessions + onboarding trace (see `SESSIONS_ONBOARDING.md`)
+
+```
+signup → session (last_used_at=now)
+  → GET /api/onboarding/status (1/5)
+  → org_create → invite_members → first_event (ingest above) → mfa_setup (5/5)
+  → GET /api/me/sessions (ip/user_agent/last_used_at)
+  → idle expiry → 401 → revoke-others
+```

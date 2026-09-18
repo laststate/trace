@@ -16,9 +16,10 @@ All notable changes to the LastState Trace backend.
   reset/verify/resend (global limiter unchanged).
 - **Password policy** - 12–128 chars (bcrypt truncation guard) + common-password
   blocklist, enforced in store and endpoints.
-- **SAML hardening** - strict XML parsing, Conditions (audience/recipient/
-  time window) enforced, deflate-correct AuthnRequests. XMLDSig verification
-  still absent: ACS stays behind `TRACE_SAML_INSECURE` (prod-rejected).
+- **SAML SSO verified** - assertion XML signatures checked with
+  goxmldsig against the org IdP certificate, plus Conditions
+  (audience/recipient/time window) and deflate-correct AuthnRequests.
+  Uncertified path still prod-rejected; signed round-trip + tamper tests.
 - **RBAC cleanup** - single rank source (`store.RoleRank`), dead ACL helpers
   removed, org creation requires admin.
 

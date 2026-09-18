@@ -34,6 +34,14 @@ func (t *tenantTestStore) UserIsMemberOfOrg(ctx context.Context, userID, orgID u
 	return t.member, nil
 }
 
+func (t *tenantTestStore) TouchSession(ctx context.Context, sessionID uuid.UUID, ip, userAgent string) error {
+	return nil
+}
+
+func (t *tenantTestStore) RevokeSession(ctx context.Context, sessionID, userID uuid.UUID) error {
+	return nil
+}
+
 // makeAuthRequest builds a request whose Authorization header carries a
 // non-empty secret. The fake store will resolve it to the configured session.
 func makeAuthRequest(method, path string, headers map[string]string) *http.Request {

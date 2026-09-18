@@ -56,7 +56,7 @@ a claim that every product surface is production-ready.
 - [x] Web UI with React SPA
 - [x] REST API with OpenAPI spec
 - [x] OIDC SSO (PKCE, JWKS validation, membership-gated)
-- [ ] SAML SSO production verification (ACS is a stub: `501 saml_not_ready` unless `TRACE_SAML_INSECURE=true`, which production rejects — see SECURITY.md)
+- [x] SAML SSO (goxmldsig signature verification + Conditions; IdP certificate required)
 - [ ] Multi-provider billing (Stripe is implemented; Mercado Pago/Crypto require
   provider-specific production flows)
 - [x] Helm charts for Kubernetes

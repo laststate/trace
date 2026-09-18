@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -220,6 +221,152 @@ func (s *Store) CreatePasswordlessUser(ctx context.Context, email, name string) 
 		return User{}, err
 	}
 	return u, nil
+}
+
+// SCIMGroup is an IdP-synced group inside one organization.
+type SCIMGroup struct {
+	ID         uuid.UUID
+	OrgID      uuid.UUID
+	DisplayName string
+	ExternalID string
+	Members    []uuid.UUID
+}
+
+// ListSCIMGroups returns groups in an org with member ids.
+func (s *Store) ListSCIMGroups(ctx context.Context, orgID uuid.UUID) ([]SCIMGroup, error) {
+	rows, err := s.Pool.Query(ctx, `
+SELECT id, display_name, external_id FROM scim_groups WHERE organization_id=$1 ORDER BY display_name`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SCIMGroup
+	for rows.Next() {
+		var g SCIMGroup
+		if err := rows.Scan(&g.ID, &g.DisplayName, &g.ExternalID); err != nil {
+			return nil, err
+		}
+		g.OrgID = orgID
+		mrows, err := s.Pool.Query(ctx, `SELECT user_id FROM scim_group_members WHERE group_id=$1`, g.ID)
+		if err != nil {
+			return nil, err
+		}
+		for mrows.Next() {
+			var uid uuid.UUID
+			if err := mrows.Scan(&uid); err != nil {
+				mrows.Close()
+				return nil, err
+			}
+			g.Members = append(g.Members, uid)
+		}
+		mrows.Close()
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
+// CreateSCIMGroup creates a group; display names are unique per org.
+func (s *Store) CreateSCIMGroup(ctx context.Context, orgID uuid.UUID, displayName, externalID string) (SCIMGroup, error) {
+	var g SCIMGroup
+	err := s.Pool.QueryRow(ctx, `
+INSERT INTO scim_groups(organization_id, display_name, external_id)
+VALUES ($1, $2, $3) RETURNING id, display_name, external_id`,
+		orgID, displayName, externalID).Scan(&g.ID, &g.DisplayName, &g.ExternalID)
+	if err != nil {
+		return SCIMGroup{}, err
+	}
+	g.OrgID = orgID
+	return g, nil
+}
+
+// GetSCIMGroup returns one group of an org.
+func (s *Store) GetSCIMGroup(ctx context.Context, orgID, groupID uuid.UUID) (*SCIMGroup, error) {
+	var g SCIMGroup
+	err := s.Pool.QueryRow(ctx, `
+SELECT id, display_name, external_id FROM scim_groups WHERE id=$1 AND organization_id=$2`,
+		groupID, orgID).Scan(&g.ID, &g.DisplayName, &g.ExternalID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	g.OrgID = orgID
+	mrows, err := s.Pool.Query(ctx, `SELECT user_id FROM scim_group_members WHERE group_id=$1`, g.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer mrows.Close()
+	for mrows.Next() {
+		var uid uuid.UUID
+		if err := mrows.Scan(&uid); err != nil {
+			return nil, err
+		}
+		g.Members = append(g.Members, uid)
+	}
+	return &g, mrows.Err()
+}
+
+// SetSCIMGroupMembers replaces a group's membership. Every id must be a
+// member of the org; unknown users abort the whole update (no partial sync).
+func (s *Store) SetSCIMGroupMembers(ctx context.Context, orgID, groupID uuid.UUID, userIDs []uuid.UUID) error {
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var exists bool
+	if err := tx.QueryRow(ctx, `SELECT true FROM scim_groups WHERE id=$1 AND organization_id=$2`, groupID, orgID).Scan(&exists); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	for _, uid := range userIDs {
+		var m bool
+		if err := tx.QueryRow(ctx, `SELECT true FROM memberships WHERE organization_id=$1 AND user_id=$2`, orgID, uid).Scan(&m); err != nil {
+			return fmt.Errorf("user %s is not a member of the org: %w", uid, ErrNotFound)
+		}
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM scim_group_members WHERE group_id=$1`, groupID); err != nil {
+		return err
+	}
+	for _, uid := range userIDs {
+		if _, err := tx.Exec(ctx, `INSERT INTO scim_group_members(group_id, user_id) VALUES($1,$2) ON CONFLICT DO NOTHING`, groupID, uid); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+// DeleteSCIMGroup removes a group (memberships cascade).
+func (s *Store) DeleteSCIMGroup(ctx context.Context, orgID, groupID uuid.UUID) error {
+	ct, err := s.Pool.Exec(ctx, `DELETE FROM scim_groups WHERE id=$1 AND organization_id=$2`, groupID, orgID)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// TouchSession records activity metadata (best-effort; failures are ignored
+// by callers so auth never depends on a metadata write).
+func (s *Store) TouchSession(ctx context.Context, sessionID uuid.UUID, ip, userAgent string) error {
+	if ip == "" && userAgent == "" {
+		_, err := s.Pool.Exec(ctx, `UPDATE sessions SET last_used_at=now() WHERE id=$1 AND revoked_at IS NULL`, sessionID)
+		return err
+	}
+	_, err := s.Pool.Exec(ctx, `UPDATE sessions SET last_used_at=now(), ip=$2::inet, user_agent=$3 WHERE id=$1 AND revoked_at IS NULL`, sessionID, nullIfEmpty(ip), userAgent)
+	return err
+}
+
+func nullIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 // UserIDByEmail resolves a user id by email for flows that must not

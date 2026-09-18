@@ -41,11 +41,13 @@ per-IP limiter on top of the global one.
 
 | Feature | Status |
 |---------|--------|
-| Password login + scopes | Supported (12–128 chars, common-password blocklist, 5-fail lockout) |
+| Password login + scopes | Supported (12–128 chars, common-password blocklist + opt-in HIBP k-anonymity, 5-fail lockout) |
 | MFA (TOTP + emailed backup codes) | Enforced at login when enrolled |
 | OIDC (PKCE, JWKS) | Supported; membership required; RP logout + error route |
-| SAML ACS | Hardened stub (strict XML, Conditions enforced); XMLDSig verification still missing — not production-ready |
-| SCIM | Users minimal profile (list/create/read/update/deprovision); Groups unimplemented |
+| SAML ACS | Verified (goxmldsig signature + Conditions); IdP cert required, insecure path prod-rejected (see `docs/SAML.md`) |
+| SCIM | Users minimal profile (list/create/read/update/deprovision) + Groups flat (list/create/read/replace-members/delete, no nesting) |
+| Sessions | IP/UA persisted + `TouchSession`; idle timeout `TRACE_SESSION_IDLE_TIMEOUT` (default 24h, lazy per-request); list/revoke via `/api/me/sessions` |
+| HIBP breach check | Opt-in `HIBP_CHECK=true` (k-anonymity `api.pwnedpasswords.com/range`, 3s timeout, fail-open; local blocklist always on) |
 
 ## Production hardening
 

@@ -64,6 +64,8 @@ type loginLockoutEntry struct {
 type sessionResolver interface {
 	AuthSession(ctx context.Context, secret string) (store.Session, error)
 	UserIsMemberOfOrg(ctx context.Context, userID, orgID uuid.UUID) (bool, error)
+	TouchSession(ctx context.Context, sessionID uuid.UUID, ip, userAgent string) error
+	RevokeSession(ctx context.Context, sessionID, userID uuid.UUID) error
 }
 
 // resolver returns the sessionResolver-compatible view of s.Store. In
@@ -119,6 +121,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /scim/v2/Users/{id}", s.requireUI(s.apiSCIMUser, "admin"))
 	mux.HandleFunc("PATCH /scim/v2/Users/{id}", s.requireUI(s.apiSCIMUser, "admin"))
 	mux.HandleFunc("DELETE /scim/v2/Users/{id}", s.requireUI(s.apiSCIMUser, "admin"))
+	mux.HandleFunc("GET /scim/v2/Groups", s.requireUI(s.apiSCIMGroups, "admin"))
+	mux.HandleFunc("POST /scim/v2/Groups", s.requireUI(s.apiSCIMGroups, "admin"))
+	mux.HandleFunc("GET /scim/v2/Groups/{id}", s.requireUI(s.apiSCIMGroup, "admin"))
+	mux.HandleFunc("PUT /scim/v2/Groups/{id}", s.requireUI(s.apiSCIMGroup, "admin"))
+	mux.HandleFunc("PATCH /scim/v2/Groups/{id}", s.requireUI(s.apiSCIMGroup, "admin"))
+	mux.HandleFunc("DELETE /scim/v2/Groups/{id}", s.requireUI(s.apiSCIMGroup, "admin"))
 	mux.HandleFunc("GET /api/oncall", s.requireUI(s.apiOncall, "viewer"))
 	mux.HandleFunc("POST /api/oncall", s.requireUI(s.apiOncall, "admin"))
 	mux.HandleFunc("POST /api/oncall/shifts", s.requireUI(s.apiOncallShift, "admin"))
@@ -379,7 +387,7 @@ func (s *Server) capabilities(w http.ResponseWriter, _ *http.Request) {
 		"server_id":       "trace-v" + s.Cfg.AppVersion,
 		"oidc":            s.Cfg.OIDCIssuer != "",
 		"saml":            false, // experimental; not enterprise-ready
-		"scim":            true,  // Users minimal profile (list/create/read/update/deprovision); Groups unimplemented
+		"scim":            true,  // Users minimal profile + Groups flat (list/create/read/replace-members/delete)
 		"public_register": s.Cfg.AllowPublicRegister,
 		"queue":           s.Cfg.QueueDriver,
 		"deployment":      s.Cfg.Deployment,
@@ -1040,13 +1048,8 @@ func sessionSecretFrom(r *http.Request) (string, error) {
 }
 
 func (s *Server) me(w http.ResponseWriter, r *http.Request) {
-	secret, err := sessionSecretFrom(r)
-	if err != nil {
-		writeErr(w, 401, "unauthorized", err.Error(), false)
-		return
-	}
-	sess, err := s.Store.AuthSession(r.Context(), secret)
-	if err != nil {
+	sess, ok := sessionFrom(s, r)
+	if !ok {
 		writeErr(w, 401, "unauthorized", "invalid session", false)
 		return
 	}

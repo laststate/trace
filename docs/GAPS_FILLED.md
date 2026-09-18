@@ -8,7 +8,7 @@
 | Dashboard UI | Implemented | Charts, issue detail, breadcrumb replay |
 | Search / export | Implemented | FTS + event query DSL + NDJSON export |
 | Scale | Documented | See SCALE.md; mid-scale Postgres design |
-| Auth | Implemented | Password (12–128, blocklist, lockout), MFA enforced (TOTP + emailed backup codes), OIDC + RP logout, hashed reset tokens, session revoke-on-reset; SAML hardened stub (no XMLDSig); SCIM Users minimal (Groups missing) |
+| Auth | Implemented | Password (12–128, blocklist, lockout), MFA enforced (TOTP + emailed backup codes), OIDC + RP logout, hashed reset tokens, session revoke-on-reset, SAML verified (goxmldsig + Conditions); SCIM Users minimal (Groups missing) |
 | Client SDKs | Minimal | `sdk/js`, `sdk/python` for ingest only |
 | GC | Implemented | Retention + orphan sweep |
 | E2E | Partial | Package tests + Playwright UI; full stack in E2E.md |

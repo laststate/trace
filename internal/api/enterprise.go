@@ -296,11 +296,9 @@ func (s *Server) apiSAMLLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiSAMLACS(w http.ResponseWriter, r *http.Request) {
-	// SAML ACS is experimental. Unsigned assertions are rejected unless TRACE_SAML_INSECURE=true.
-	if !s.Cfg.SAMLInsecure {
-		writeErr(w, 501, "saml_not_ready", "SAML ACS requires signature verification; set TRACE_SAML_INSECURE=true only for local testing (forbidden in production)", false)
-		return
-	}
+	// SAML ACS verifies XML signatures against the org's IdP certificate.
+	// Without a certificate only the insecure local-test path remains, which
+	// production config rejects.
 	if err := r.ParseForm(); err != nil {
 		writeErr(w, 400, "form", err.Error(), false)
 		return
@@ -321,9 +319,13 @@ func (s *Server) apiSAMLACS(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if cert == "" && !s.Cfg.SAMLInsecure {
+		writeErr(w, 501, "saml_not_ready", "SAML ACS requires an IdP certificate; set TRACE_SAML_INSECURE=true only for local testing (forbidden in production)", false)
+		return
+	}
 	a, err := saml.ParseResponse(resp, saml.VerifyOpts{
-		RequireCert: cert != "",
 		CertPEM:     cert,
+		AllowNoCert: s.Cfg.SAMLInsecure,
 		EntityID:    entityID,
 		ACSURL:      acsURL,
 	})

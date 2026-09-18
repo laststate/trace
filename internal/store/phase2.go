@@ -3,11 +3,15 @@ package store
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -31,6 +35,7 @@ type Session struct {
 	OrganizationID uuid.UUID
 	Role           string
 	SessionID      uuid.UUID
+	LastUsedAt     *time.Time
 }
 
 type AuditEntry struct {
@@ -72,8 +77,8 @@ func (s *Store) EnsureAdmin(ctx context.Context, email, password, name string) (
 	if password == "" || password == "admin" || password == "password" || password == "admin123" {
 		password = GeneratePassword()
 	}
-	if len(password) < 12 {
-		return User{}, "", errors.New("admin password must be at least 12 characters (or leave empty to auto-generate)")
+	if err := CheckPasswordPolicy(password); err != nil {
+		return User{}, "", err
 	}
 	org, err := s.firstOrg(ctx)
 	if err != nil {
@@ -130,7 +135,51 @@ func CheckPasswordPolicy(password string) error {
 			return errors.New("password is too common; choose a less predictable one")
 		}
 	}
+	if breachedViaHIBP(password) {
+		return errors.New("password appeared in known breaches; choose another one")
+	}
 	return nil
+}
+
+// breachedViaHIBP checks the password against Have I Been Pwned via the
+// k-anonymity range API (only the first 5 hex chars of the SHA-1 leave the
+// process). Opt-in via HIBP_CHECK=true; any transport failure or timeout
+// fails OPEN (local blocklist above still applies) so onboarding never
+// depends on a third party.
+func breachedViaHIBP(password string) bool {
+	if os.Getenv("HIBP_CHECK") != "true" {
+		return false
+	}
+	sum := sha1.Sum([]byte(password))
+	hexSum := strings.ToUpper(hex.EncodeToString(sum[:]))
+	prefix, suffix := hexSum[:5], hexSum[5:]
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.pwnedpasswords.com/range/"+prefix, nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("User-Agent", "laststate-trace-pwcheck")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(body), "\n") {
+		if hash, _, ok := strings.Cut(strings.TrimSpace(line), ":"); ok {
+			if strings.EqualFold(hash, suffix) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // breachedPasswords is a minimal blocklist of the most-abused passwords.
@@ -293,7 +342,7 @@ func (s *Store) MintSession(ctx context.Context, u User, orgID uuid.UUID, role s
 	}
 	var sid uuid.UUID
 	err = s.Pool.QueryRow(ctx, `
-INSERT INTO sessions(user_id,token_hash,prefix,expires_at) VALUES($1,$2,$3,now() + interval '7 days')
+INSERT INTO sessions(user_id,token_hash,prefix,expires_at,last_used_at) VALUES($1,$2,$3,now() + interval '7 days',now())
 RETURNING id`, u.ID, th, prefix).Scan(&sid)
 	if err != nil {
 		return Session{}, "", err
@@ -306,14 +355,15 @@ func (s *Store) AuthSession(ctx context.Context, secret string) (Session, error)
 	var sid, uid, orgID uuid.UUID
 	var hash []byte
 	var email, name, role string
+	var lastUsed *time.Time
 	err := s.Pool.QueryRow(ctx, `
-SELECT s.id, s.user_id, s.token_hash, u.email, u.name, m.organization_id, m.role
+SELECT s.id, s.user_id, s.token_hash, u.email, u.name, m.organization_id, m.role, s.last_used_at
 FROM sessions s
 JOIN users u ON u.id=s.user_id
 JOIN memberships m ON m.user_id=u.id
 WHERE s.prefix=$1 AND s.revoked_at IS NULL AND s.expires_at > now()
 ORDER BY m.created_at ASC LIMIT 1`, prefix).
-		Scan(&sid, &uid, &hash, &email, &name, &orgID, &role)
+		Scan(&sid, &uid, &hash, &email, &name, &orgID, &role, &lastUsed)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Session{}, ErrNotFound
 	}
@@ -323,7 +373,7 @@ ORDER BY m.created_at ASC LIMIT 1`, prefix).
 	if !auth.Equal(hash, auth.Hash(secret)) {
 		return Session{}, ErrNotFound
 	}
-	return Session{UserID: uid, Email: email, Name: name, OrganizationID: orgID, Role: role, SessionID: sid}, nil
+	return Session{UserID: uid, Email: email, Name: name, OrganizationID: orgID, Role: role, SessionID: sid, LastUsedAt: lastUsed}, nil
 }
 
 // roleRanks is the canonical role hierarchy. The api layer resolves ranks

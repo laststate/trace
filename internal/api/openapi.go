@@ -749,6 +749,40 @@ const openapiJSON = `{
         "security": [{ "bearerAuth": [] }]
       }
     },
+    "/scim/v2/Groups": {
+      "get": {
+        "tags": ["admin"],
+        "summary": "SCIM v2 Group list (filter=displayName eq, startIndex, count)",
+        "security": [{ "bearerAuth": [] }]
+      },
+      "post": {
+        "tags": ["admin"],
+        "summary": "SCIM v2 Group create (displayName + optional members[])",
+        "security": [{ "bearerAuth": [] }]
+      }
+    },
+    "/scim/v2/Groups/{id}": {
+      "get": {
+        "tags": ["admin"],
+        "summary": "SCIM v2 Group read",
+        "security": [{ "bearerAuth": [] }]
+      },
+      "put": {
+        "tags": ["admin"],
+        "summary": "SCIM v2 Group replace members (displayName immutable)",
+        "security": [{ "bearerAuth": [] }]
+      },
+      "patch": {
+        "tags": ["admin"],
+        "summary": "SCIM v2 Group patch members (same as PUT)",
+        "security": [{ "bearerAuth": [] }]
+      },
+      "delete": {
+        "tags": ["admin"],
+        "summary": "SCIM v2 Group delete (cascade members)",
+        "security": [{ "bearerAuth": [] }]
+      }
+    },
     "/api/saml/config": {
       "get": {
         "tags": ["admin"],

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -48,6 +49,21 @@ func sessionFrom(s *Server, r *http.Request) (store.Session, bool) {
 	if err != nil || sess.UserID == uuid.Nil {
 		return store.Session{}, false
 	}
+	// Idle expiry: sessions silent longer than SessionIdleTimeout are dead.
+	// Revoke best-effort so the row can't be revived by clock skew games.
+	if s.Cfg.SessionIdleTimeout > 0 && sess.LastUsedAt != nil {
+		if time.Since(*sess.LastUsedAt) > s.Cfg.SessionIdleTimeout {
+			_ = s.resolver().RevokeSession(r.Context(), sess.SessionID, sess.UserID)
+			return store.Session{}, false
+		}
+	}
+	// Best-effort activity touch (populates the /api/me/sessions UI).
+	// Fire-and-forget: auth must never wait on a metadata write.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = s.resolver().TouchSession(ctx, sess.SessionID, clientIP(r), r.UserAgent())
+	}()
 	return sess, true
 }
 

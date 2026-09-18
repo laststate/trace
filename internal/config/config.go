@@ -82,7 +82,8 @@ type Config struct {
 	SAMLInsecure        bool   // TRACE_SAML_INSECURE allow unsigned ACS (default false)
 	TrustedProxies      string // TRACE_TRUSTED_PROXIES comma-separated CIDRs/IPs
 	SecretsKey          string // TRACE_SECRETS_KEY 32-byte base64/hex for AES-GCM secret at rest
-	CookieSecure        bool   // TRACE_COOKIE_SECURE (default true when PublicURL is https)
+	CookieSecure        bool          // TRACE_COOKIE_SECURE (default true when PublicURL is https)
+	SessionIdleTimeout time.Duration // TRACE_SESSION_IDLE_TIMEOUT (default 24h; 0 disables idle expiry)
 	ShutdownTimeoutSec  int    // TRACE_SHUTDOWN_TIMEOUT_SEC (default 10)
 	AppVersion          string
 
@@ -180,6 +181,7 @@ func Load() Config {
 		AllowPublicRegister: env("TRACE_ALLOW_PUBLIC_REGISTER", "false") == "true",
 		OIDCAutoJoin:        env("TRACE_OIDC_AUTO_JOIN", "false") == "true",
 		SAMLInsecure:        env("TRACE_SAML_INSECURE", "false") == "true",
+		SessionIdleTimeout:  24 * time.Hour,
 		TrustedProxies:      env("TRACE_TRUSTED_PROXIES", ""),
 		SecretsKey:          env("TRACE_SECRETS_KEY", ""),
 		ShutdownTimeoutSec:  int(envInt64("TRACE_SHUTDOWN_TIMEOUT_SEC", 10)),
@@ -236,6 +238,11 @@ func Load() Config {
 		// (common when TLS is terminated at reverse proxy)
 		if !c.CookieSecure && (strings.EqualFold(env("TRACE_ENV", ""), "production") || strings.EqualFold(env("TRACE_ENV", ""), "prod")) {
 			c.CookieSecure = true
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("TRACE_SESSION_IDLE_TIMEOUT")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d >= 0 {
+			c.SessionIdleTimeout = d
 		}
 	}
 	return c

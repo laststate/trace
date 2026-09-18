@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -27,6 +28,14 @@ func (f *fakeSessionResolver) AuthSession(ctx context.Context, secret string) (s
 
 func (f *fakeSessionResolver) UserIsMemberOfOrg(ctx context.Context, userID, orgID uuid.UUID) (bool, error) {
 	return true, nil
+}
+
+func (f *fakeSessionResolver) TouchSession(ctx context.Context, sessionID uuid.UUID, ip, userAgent string) error {
+	return nil
+}
+
+func (f *fakeSessionResolver) RevokeSession(ctx context.Context, sessionID, userID uuid.UUID) error {
+	return nil
 }
 
 // TestSessionFrom_NoServer confirms that the nil-server guard returns false
@@ -116,5 +125,64 @@ func TestSessionSecret(t *testing.T) {
 	req4.Header.Set("Authorization", "NotBearer xxx")
 	if _, ok := sessionSecret(req4); ok {
 		t.Fatal("malformed header should not yield a secret")
+	}
+}
+
+// idleTestResolver tracks Touch/Revoke calls for idle-expiry tests.
+type idleTestResolver struct {
+	fakeSessionResolver
+	touchedIP string
+	touchedUA string
+	revoked   bool
+}
+
+func (f *idleTestResolver) TouchSession(ctx context.Context, sessionID uuid.UUID, ip, userAgent string) error {
+	f.touchedIP = ip
+	f.touchedUA = userAgent
+	return nil
+}
+
+func (f *idleTestResolver) RevokeSession(ctx context.Context, sessionID, userID uuid.UUID) error {
+	f.revoked = true
+	return nil
+}
+
+// TestSessionFrom_IdleExpired confirms sessions silent longer than
+// TRACE_SESSION_IDLE_TIMEOUT are rejected (and revoked best-effort).
+func TestSessionFrom_IdleExpired(t *testing.T) {
+	stale := time.Now().Add(-48 * time.Hour)
+	res := &idleTestResolver{fakeSessionResolver: fakeSessionResolver{session: store.Session{
+		UserID: uuid.New(), Email: "idle@example.com",
+		OrganizationID: uuid.New(), Role: "viewer",
+		SessionID: uuid.New(), LastUsedAt: &stale,
+	}}}
+	s := newServerWithResolver(res)
+	s.Cfg.SessionIdleTimeout = 24 * time.Hour
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer lst_sess_xxx")
+	if _, ok := sessionFrom(s, req); ok {
+		t.Fatal("expected idle session to be rejected")
+	}
+	if !res.revoked {
+		t.Fatal("expected best-effort RevokeSession on idle expiry")
+	}
+}
+
+// TestSessionFrom_IdleFresh confirms active sessions pass and touch IP/UA
+// (fire-and-forget; assert via resolver after a short wait).
+func TestSessionFrom_IdleFreshTouchesIPUA(t *testing.T) {
+	fresh := time.Now()
+	res := &idleTestResolver{fakeSessionResolver: fakeSessionResolver{session: store.Session{
+		UserID: uuid.New(), Email: "fresh@example.com",
+		OrganizationID: uuid.New(), Role: "viewer",
+		SessionID: uuid.New(), LastUsedAt: &fresh,
+	}}}
+	s := newServerWithResolver(res)
+	s.Cfg.SessionIdleTimeout = 24 * time.Hour
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer lst_sess_xxx")
+	req.Header.Set("User-Agent", "e2e-trace/1.0")
+	if _, ok := sessionFrom(s, req); !ok {
+		t.Fatal("expected fresh session to pass")
 	}
 }

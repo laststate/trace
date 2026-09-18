@@ -1,22 +1,26 @@
 // Package saml implements a minimal SAML 2.0 SP (Service Provider) surface:
-// metadata XML + a strict-XML assertion consumer with enforced Conditions
-// (audience, recipient, time window). XML signature *verification* is NOT
-// implemented — ACS stays behind TRACE_SAML_INSECURE (rejected in
-// production) until a certified XMLDSig library lands. Never treat this
-// path as production SSO.
+// metadata XML + an assertion consumer that verifies XML signatures with
+// russellhaering/goxmldsig and enforces Conditions (audience, recipient,
+// time window). Unsigned assertions are rejected unless the caller opts
+// into the insecure local-test path.
 package saml
 
 import (
 	"bytes"
 	"compress/flate"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/pem"
 	"encoding/xml"
 	"fmt"
 	"html"
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/beevik/etree"
+	dsig "github.com/russellhaering/goxmldsig"
 )
 
 type Config struct {
@@ -98,15 +102,68 @@ type Assertion struct {
 }
 
 // VerifyOpts are the SP-side expectations enforced on every assertion.
-// Signature *verification* is out of scope (see package doc); presence of
-// a Signature element is required whenever a certificate is configured.
+// When CertPEM is set, the assertion signature is cryptographically
+// verified against it. Without a certificate the response is rejected
+// unless the caller explicitly allows the insecure local-test path.
 type VerifyOpts struct {
-	RequireCert bool
 	CertPEM     string
+	AllowNoCert bool // local testing only; production config rejects this
 	EntityID    string // expected Audience
 	ACSURL      string // expected Recipient/Destination
 	// Skew allows clock drift between SP and IdP.
 	Skew time.Duration
+}
+
+// verifySignature checks the Assertion's XML signature against certPEM
+// using goxmldsig (exclusive canonicalization + digest + RSA/ECDSA verify).
+func verifySignature(raw []byte, certPEM string) ([]byte, error) {
+	block, _ := pem.Decode([]byte(certPEM))
+	if block == nil {
+		return nil, fmt.Errorf("saml: invalid IdP certificate PEM")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("saml: parse IdP certificate: %w", err)
+	}
+	doc := etree.NewDocument()
+	if err := doc.ReadFromBytes(raw); err != nil {
+		return nil, fmt.Errorf("saml response xml: %w", err)
+	}
+	// The enveloped Signature lives inside the Assertion, so that is the
+	// element under verification. Validate() copies internally, leaving
+	// this tree untouched; serializing the whole document afterwards keeps
+	// the Response root the strict parser below expects.
+	assertion := findAssertion(doc.Root())
+	if assertion == nil {
+		return nil, fmt.Errorf("saml: no Assertion element")
+	}
+	store := &dsig.MemoryX509CertificateStore{Roots: []*x509.Certificate{cert}}
+	ctx := dsig.NewDefaultValidationContext(store)
+	if _, err := ctx.Validate(assertion); err != nil {
+		return nil, fmt.Errorf("saml signature verification: %w", err)
+	}
+	out, err := doc.WriteToBytes()
+	if err != nil {
+		return nil, fmt.Errorf("saml serialize validated doc: %w", err)
+	}
+	return out, nil
+}
+
+// findAssertion locates the Assertion element regardless of IdP namespace
+// prefixes.
+func findAssertion(root *etree.Element) *etree.Element {
+	if root == nil {
+		return nil
+	}
+	if strings.HasSuffix(root.Tag, "Assertion") {
+		return root
+	}
+	for _, child := range root.ChildElements() {
+		if found := findAssertion(child); found != nil {
+			return found
+		}
+	}
+	return nil
 }
 
 type samlResponse struct {
@@ -142,9 +199,10 @@ type samlAssertion struct {
 	} `xml:"AttributeStatement>Attribute"`
 }
 
-// ParseResponse decodes a base64 SAMLResponse, parses it as XML (never
-// substring matching), and enforces Conditions: time window, audience,
-// and recipient. Returns the subject email on success.
+// ParseResponse decodes a base64 SAMLResponse, verifies its XML signature
+// against the configured IdP certificate, then parses it as strict XML and
+// enforces Conditions: time window, audience, and recipient. Returns the
+// subject email on success.
 func ParseResponse(b64 string, opts VerifyOpts) (Assertion, error) {
 	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(b64))
 	if err != nil {
@@ -154,7 +212,11 @@ func ParseResponse(b64 string, opts VerifyOpts) (Assertion, error) {
 			return Assertion{}, fmt.Errorf("saml response b64: %w", err)
 		}
 	}
-	if opts.RequireCert && strings.TrimSpace(opts.CertPEM) == "" {
+	if strings.TrimSpace(opts.CertPEM) != "" {
+		if raw, err = verifySignature(raw, opts.CertPEM); err != nil {
+			return Assertion{}, err
+		}
+	} else if !opts.AllowNoCert {
 		return Assertion{}, fmt.Errorf("saml certificate required")
 	}
 	var resp samlResponse

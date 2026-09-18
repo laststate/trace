@@ -11,10 +11,10 @@ import (
 	"github.com/laststate/trace/internal/store"
 )
 
-// SCIM 2.0 Users (RFC 7643/7644), minimal profile: list, create, read,
-// update-name, and deprovision-via-DELETE. Groups are not implemented
-// (no group model exists); the API answers 501 for /scim/v2/Groups so
-// IdPs fail visibly instead of half-syncing.
+// SCIM 2.0 Users + Groups (RFC 7643/7644), minimal profile: Users list,
+// create, read, update-name, deprovision-via-DELETE; Groups list/create/read/
+// replace-members/delete (flat membership, no nesting per RFC 7644 §4.2 MAY;
+// displayName immutable, renames via delete+create).
 
 const scimUserSchema = "urn:ietf:params:scim:schemas:core:2.0:User"
 
@@ -341,4 +341,231 @@ func (s *Server) apiSCIMUpdateUser(w http.ResponseWriter, r *http.Request, orgID
 		member.Name = body.Name.Formatted
 	}
 	writeJSON(w, 200, scimUserResource(orgID, member.ID, member.Email, member.Name, member.Role))
+}
+
+// ---- Groups (flat membership; no nesting) ----
+
+const scimGroupSchema = "urn:ietf:params:scim:schemas:core:2.0:Group"
+
+func scimGroupResource(orgID uuid.UUID, g store.SCIMGroup, emails map[uuid.UUID]string) map[string]any {
+	members := make([]any, 0, len(g.Members))
+	for _, uid := range g.Members {
+		m := map[string]any{"value": uid.String()}
+		if email, ok := emails[uid]; ok && email != "" {
+			m["display"] = email
+		}
+		members = append(members, m)
+	}
+	return map[string]any{
+		"schemas":     []string{scimGroupSchema},
+		"id":          g.ID.String(),
+		"displayName": g.DisplayName,
+		"externalId":  g.ExternalID,
+		"members":     members,
+		"meta": map[string]any{
+			"resourceType": "Group",
+			"location":     "/scim/v2/Groups/" + g.ID.String() + "?organization_id=" + orgID.String(),
+		},
+	}
+}
+
+// memberEmails resolves display emails for a member id set.
+func (s *Server) memberEmails(r *http.Request, orgID uuid.UUID, ids []uuid.UUID) map[uuid.UUID]string {
+	out := map[uuid.UUID]string{}
+	members, err := s.Store.ListMembers(r.Context(), orgID)
+	if err != nil {
+		return out
+	}
+	want := map[uuid.UUID]bool{}
+	for _, id := range ids {
+		want[id] = true
+	}
+	for _, m := range members {
+		var id uuid.UUID
+		switch v := m["id"].(type) {
+		case uuid.UUID:
+			id = v
+		case string:
+			id, _ = uuid.Parse(v)
+		}
+		if want[id] {
+			if email, _ := m["email"].(string); email != "" {
+				out[id] = email
+			}
+		}
+	}
+	return out
+}
+
+// apiSCIMGroups routes GET (list) and POST (create).
+func (s *Server) apiSCIMGroups(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.apiSCIMListGroups(w, r)
+	case http.MethodPost:
+		s.apiSCIMCreateGroup(w, r)
+	default:
+		writeErr(w, 405, "method_not_allowed", "use GET or POST", false)
+	}
+}
+
+func (s *Server) apiSCIMListGroups(w http.ResponseWriter, r *http.Request) {
+	orgID, err := s.scimScopeOrg(r)
+	if err != nil {
+		writeErr(w, 403, "forbidden", "not a member of the target organization", false)
+		return
+	}
+	groups, err := s.Store.ListSCIMGroups(r.Context(), orgID)
+	if err != nil {
+		writeErr(w, 500, "internal", err.Error(), true)
+		return
+	}
+	filter := strings.TrimSpace(r.URL.Query().Get("filter"))
+	var resources []any
+	for _, g := range groups {
+		if filter != "" && !matchDisplayNameFilter(filter, g.DisplayName) {
+			continue
+		}
+		resources = append(resources, scimGroupResource(orgID, g, s.memberEmails(r, orgID, g.Members)))
+	}
+	if resources == nil {
+		resources = []any{}
+	}
+	start, count := scimPage(r, len(resources))
+	end := start + count
+	if end > len(resources) {
+		end = len(resources)
+	}
+	writeJSON(w, 200, map[string]any{
+		"schemas":      []string{"urn:ietf:params:scim:api:messages:2.0:ListResponse"},
+		"totalResults": len(resources),
+		"startIndex":   start + 1,
+		"itemsPerPage": end - start,
+		"Resources":    resources[start:end],
+	})
+}
+
+// matchDisplayNameFilter supports: displayName eq "name" (case-insensitive).
+func matchDisplayNameFilter(filter, display string) bool {
+	lower := strings.ToLower(strings.TrimSpace(filter))
+	if !strings.HasPrefix(lower, "displayname eq ") {
+		return true
+	}
+	want := strings.Trim(strings.TrimSpace(filter[len("displayName eq "):]), `"'`)
+	return strings.EqualFold(display, want)
+}
+
+func (s *Server) apiSCIMCreateGroup(w http.ResponseWriter, r *http.Request) {
+	orgID, err := s.scimScopeOrg(r)
+	if err != nil {
+		writeErr(w, 403, "forbidden", "not a member of the target organization", false)
+		return
+	}
+	var body struct {
+		DisplayName string `json:"displayName"`
+		ExternalID  string `json:"externalId"`
+		Members     []struct {
+			Value string `json:"value"`
+		} `json:"members"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, 400, "bad_request", "invalid body", false)
+		return
+	}
+	if strings.TrimSpace(body.DisplayName) == "" {
+		writeErr(w, 400, "bad_request", "displayName is required", false)
+		return
+	}
+	g, err := s.Store.CreateSCIMGroup(r.Context(), orgID, strings.TrimSpace(body.DisplayName), body.ExternalID)
+	if err != nil {
+		writeErr(w, 409, "conflict", err.Error(), false)
+		return
+	}
+	if len(body.Members) > 0 {
+		var ids []uuid.UUID
+		for _, m := range body.Members {
+			id, err := uuid.Parse(m.Value)
+			if err != nil {
+				writeErr(w, 400, "bad_request", "invalid member id", false)
+				return
+			}
+			ids = append(ids, id)
+		}
+		if err := s.Store.SetSCIMGroupMembers(r.Context(), orgID, g.ID, ids); err != nil {
+			writeErr(w, 400, "bad_request", err.Error(), false)
+			return
+		}
+		g.Members = ids
+	}
+	sess, _ := sessionFrom(s, r)
+	var actor *uuid.UUID
+	if sess.UserID != uuid.Nil {
+		actor = &sess.UserID
+	}
+	s.Store.Audit(r.Context(), actor, nil, &orgID, nil, "auth.scim_group_create", "group", g.ID.String(), clientIP(r), r.UserAgent(), map[string]any{"displayName": g.DisplayName})
+	w.Header().Set("Location", "/scim/v2/Groups/"+g.ID.String())
+	writeJSON(w, 201, scimGroupResource(orgID, g, s.memberEmails(r, orgID, g.Members)))
+}
+
+// apiSCIMGroup routes GET, PUT/PATCH, DELETE on /scim/v2/Groups/{id}.
+func (s *Server) apiSCIMGroup(w http.ResponseWriter, r *http.Request) {
+	orgID, err := s.scimScopeOrg(r)
+	if err != nil {
+		writeErr(w, 403, "forbidden", "not a member of the target organization", false)
+		return
+	}
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, 400, "bad_id", "invalid id", false)
+		return
+	}
+	g, err := s.Store.GetSCIMGroup(r.Context(), orgID, id)
+	if err != nil {
+		writeErr(w, 404, "not_found", "group not found in organization", false)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, 200, scimGroupResource(orgID, *g, s.memberEmails(r, orgID, g.Members)))
+	case http.MethodPut, http.MethodPatch:
+		var body struct {
+			DisplayName string `json:"displayName"`
+			Members     []struct {
+				Value string `json:"value"`
+			} `json:"members"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeErr(w, 400, "bad_request", "invalid body", false)
+			return
+		}
+		if body.Members != nil {
+			var ids []uuid.UUID
+			for _, m := range body.Members {
+				uid, err := uuid.Parse(m.Value)
+				if err != nil {
+					writeErr(w, 400, "bad_request", "invalid member id", false)
+					return
+				}
+				ids = append(ids, uid)
+			}
+			if ids == nil {
+				ids = []uuid.UUID{}
+			}
+			if err := s.Store.SetSCIMGroupMembers(r.Context(), orgID, id, ids); err != nil {
+				writeErr(w, 400, "bad_request", err.Error(), false)
+				return
+			}
+			g.Members = ids
+		}
+		// displayName is immutable (unique key); renames go through delete+create.
+		writeJSON(w, 200, scimGroupResource(orgID, *g, s.memberEmails(r, orgID, g.Members)))
+	case http.MethodDelete:
+		if err := s.Store.DeleteSCIMGroup(r.Context(), orgID, id); err != nil {
+			writeErr(w, 500, "internal", err.Error(), true)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		writeErr(w, 405, "method_not_allowed", "use GET, PUT, PATCH or DELETE", false)
+	}
 }

@@ -61,7 +61,8 @@ go run ./cmd/trace --migrate down
 | `crashes` | Crash events with metadata |
 | `symbols` | Symbol files for resolution |
 | `users` | User accounts |
-| `sessions` | Auth sessions |
+| `sessions` | Auth sessions (`002` + `010 ip/ua` + `026/027 last_used_at`; see `SESSIONS_ONBOARDING.md`) |
+| `onboarding_steps` | Onboarding progress (`011`: `(user_id, step)` UNIQUE; see `SESSIONS_ONBOARDING.md`) |
 | `api_keys` | API key management |
 | `organizations` | Multi-tenant organizations |
 
