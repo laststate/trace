@@ -20,9 +20,12 @@ details, or production endpoint credentials.
 
 ## Sessions
 
-Browser sessions use an **HttpOnly** cookie (`trace_session`). Bearer tokens
-remain supported for Relay and scripts. Prefer cookies for the SPA
-(`credentials: 'same-origin'`).
+Browser sessions use an **HttpOnly** cookie (`trace_session`, 7-day lifetime
+matching `sessions.expires_at`). Bearer tokens remain supported for Relay and
+scripts. Prefer cookies for the SPA (`credentials: 'same-origin'`).
+Password reset revokes all sessions; MFA (TOTP or single-use emailed code)
+is enforced at login when enrolled. Auth endpoints carry a strict 20 req/min
+per-IP limiter on top of the global one.
 
 ## Cryptographic design
 
@@ -38,10 +41,11 @@ remain supported for Relay and scripts. Prefer cookies for the SPA
 
 | Feature | Status |
 |---------|--------|
-| Password login + scopes | Supported |
-| OIDC (PKCE, JWKS) | Supported; membership required |
-| SAML ACS | Experimental; not production-ready |
-| SCIM | Not implemented (HTTP 501) |
+| Password login + scopes | Supported (12–128 chars, common-password blocklist, 5-fail lockout) |
+| MFA (TOTP + emailed backup codes) | Enforced at login when enrolled |
+| OIDC (PKCE, JWKS) | Supported; membership required; RP logout + error route |
+| SAML ACS | Hardened stub (strict XML, Conditions enforced); XMLDSig verification still missing — not production-ready |
+| SCIM | Users minimal profile (list/create/read/update/deprovision); Groups unimplemented |
 
 ## Production hardening
 

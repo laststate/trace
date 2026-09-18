@@ -26,6 +26,30 @@ interface TokenRow {
   last_used_at?: string | null
 }
 
+interface SessionRow {
+  id: string
+  prefix?: string
+  ip?: string
+  user_agent?: string
+  created_at?: string
+  last_used_at?: string | null
+  expires_at?: string
+}
+
+interface OrgRow {
+  id: string
+  name: string
+  slug?: string
+  role?: string
+}
+
+interface MemberRow {
+  id: string
+  email: string
+  name: string
+  role: string
+}
+
 type Toast = { id: string; type: 'success' | 'error' | 'info'; message: string }
 
 export default function SettingsPanel({ data, reload, dispatchToast = () => {} }: {
@@ -51,6 +75,24 @@ export default function SettingsPanel({ data, reload, dispatchToast = () => {} }
   const [newSecret, setNewSecret] = useState('')
   const [clearing, setClearing] = useState(0)
 
+  // MFA state
+  const [mfaOn, setMfaOn] = useState<boolean | null>(null)
+  const [mfaSecret, setMfaSecret] = useState('')
+  const [mfaUri, setMfaUri] = useState('')
+  const [mfaCode, setMfaCode] = useState('')
+  const [mfaBusy, setMfaBusy] = useState(false)
+
+  // Sessions state
+  const [sessions, setSessions] = useState<SessionRow[]>([])
+  const [currentSession, setCurrentSession] = useState('')
+
+  // Organization state
+  const [orgs, setOrgs] = useState<OrgRow[]>([])
+  const [activeOrg, setActiveOrg] = useState('')
+  const [members, setMembers] = useState<MemberRow[]>([])
+  const [inviteEmail, setInviteEmail] = useState('')
+  const [inviteRole, setInviteRole] = useState('viewer')
+
   async function refreshTokens() {
     try {
       const res = await api('/api/tokens')
@@ -61,6 +103,157 @@ export default function SettingsPanel({ data, reload, dispatchToast = () => {} }
   }
 
   useEffect(() => { refreshTokens() }, [])
+
+  async function refreshMfa() {
+    try {
+      const res = await api('/api/auth/mfa/status')
+      setMfaOn(!!res.mfa_enabled)
+    } catch {
+      setMfaOn(null)
+    }
+  }
+
+  async function refreshSessions() {
+    try {
+      const res = await api('/api/me/sessions')
+      setSessions(res.items || [])
+      setCurrentSession(res.current_session_id || '')
+    } catch {
+      setSessions([])
+    }
+  }
+
+  async function refreshOrgs() {
+    try {
+      const res = await api('/api/me/orgs')
+      setOrgs(res.items || [])
+      setActiveOrg(res.active_org_id || '')
+    } catch {
+      setOrgs([])
+    }
+  }
+
+  async function refreshMembers() {
+    try {
+      const res = await api('/api/organizations/members')
+      setMembers(res.items || [])
+    } catch {
+      setMembers([])
+    }
+  }
+
+  useEffect(() => {
+    refreshMfa()
+    refreshSessions()
+    refreshOrgs()
+    refreshMembers()
+  }, [])
+
+  async function enrollMfa(e: React.FormEvent) {
+    e.preventDefault()
+    if (mfaBusy) return
+    setMfaBusy(true)
+    try {
+      const res = await api('/api/auth/mfa/enroll', { method: 'POST' })
+      setMfaSecret(res.secret || '')
+      setMfaUri(res.otpauth || '')
+    } catch (err: any) {
+      dispatchToast({ id: Math.random().toString(36).slice(2), type: 'error', message: err.message || 'MFA enroll failed' })
+    } finally {
+      setMfaBusy(false)
+    }
+  }
+
+  async function verifyMfa(e: React.FormEvent) {
+    e.preventDefault()
+    if (mfaBusy || !mfaCode) return
+    setMfaBusy(true)
+    try {
+      await api('/api/auth/mfa/verify', { method: 'POST', body: { code: mfaCode } })
+      setMfaSecret('')
+      setMfaUri('')
+      setMfaCode('')
+      await refreshMfa()
+      dispatchToast({ id: Math.random().toString(36).slice(2), type: 'success', message: 'MFA enabled — logins now require a code' })
+    } catch (err: any) {
+      dispatchToast({ id: Math.random().toString(36).slice(2), type: 'error', message: err.message || 'Invalid code' })
+    } finally {
+      setMfaBusy(false)
+    }
+  }
+
+  async function disableMfa() {
+    if (mfaBusy) return
+    setMfaBusy(true)
+    try {
+      await api('/api/auth/mfa/disable', { method: 'POST' })
+      await refreshMfa()
+      dispatchToast({ id: Math.random().toString(36).slice(2), type: 'info', message: 'MFA disabled' })
+    } catch (err: any) {
+      dispatchToast({ id: Math.random().toString(36).slice(2), type: 'error', message: err.message || 'Failed' })
+    } finally {
+      setMfaBusy(false)
+    }
+  }
+
+  async function revokeSession(id: string) {
+    try {
+      await api('/api/me/sessions/' + id, { method: 'DELETE' })
+      await refreshSessions()
+    } catch (err: any) {
+      dispatchToast({ id: Math.random().toString(36).slice(2), type: 'error', message: err.message || 'Failed' })
+    }
+  }
+
+  async function revokeOthers() {
+    try {
+      await api('/api/me/sessions/revoke-others', { method: 'POST' })
+      await refreshSessions()
+      dispatchToast({ id: Math.random().toString(36).slice(2), type: 'info', message: 'Other sessions revoked' })
+    } catch (err: any) {
+      dispatchToast({ id: Math.random().toString(36).slice(2), type: 'error', message: err.message || 'Failed' })
+    }
+  }
+
+  async function switchOrg(id: string) {
+    try {
+      await api('/api/auth/switch-org', { method: 'POST', body: { organization_id: id } })
+      window.location.reload()
+    } catch (err: any) {
+      dispatchToast({ id: Math.random().toString(36).slice(2), type: 'error', message: err.message || 'Failed' })
+    }
+  }
+
+  async function inviteMember(e: React.FormEvent) {
+    e.preventDefault()
+    if (!inviteEmail) return
+    try {
+      await api('/api/organizations/members', { method: 'POST', body: { email: inviteEmail, role: inviteRole } })
+      setInviteEmail('')
+      await refreshMembers()
+      dispatchToast({ id: Math.random().toString(36).slice(2), type: 'success', message: 'Invitation sent' })
+    } catch (err: any) {
+      dispatchToast({ id: Math.random().toString(36).slice(2), type: 'error', message: err.message || 'Failed' })
+    }
+  }
+
+  async function setMemberRole(id: string, role: string) {
+    try {
+      await api('/api/organizations/members', { method: 'PATCH', body: { user_id: id, role } })
+      await refreshMembers()
+    } catch (err: any) {
+      dispatchToast({ id: Math.random().toString(36).slice(2), type: 'error', message: err.message || 'Failed' })
+    }
+  }
+
+  async function removeMember(id: string) {
+    try {
+      await api('/api/organizations/members?user_id=' + encodeURIComponent(id), { method: 'DELETE' })
+      await refreshMembers()
+    } catch (err: any) {
+      dispatchToast({ id: Math.random().toString(36).slice(2), type: 'error', message: err.message || 'Failed' })
+    }
+  }
 
   async function saveRetention(e: React.FormEvent) {
     e.preventDefault()
@@ -264,6 +457,135 @@ export default function SettingsPanel({ data, reload, dispatchToast = () => {} }
             <a href="/openapi.json" target="_blank" rel="noreferrer">OpenAPI</a>
           </p>
         </div>
+      </div>
+
+      {/* MFA */}
+      <div style={{ marginTop: '1.5rem' }}>
+        <h3><Shield size={14} style={{ verticalAlign: '-2px', marginRight: 4 }} />Multi-factor auth</h3>
+        {mfaOn === null ? (
+          <p className="meta">MFA status unavailable.</p>
+        ) : mfaOn ? (
+          <div className="row gap" style={{ alignItems: 'center' }}>
+            <Badge>MFA on — logins require a code</Badge>
+            <Button type="button" variant="secondary" size="sm" disabled={mfaBusy} onClick={disableMfa}>Disable MFA</Button>
+          </div>
+        ) : mfaSecret ? (
+          <form className="settings-form" onSubmit={verifyMfa}>
+            <p className="meta">Scan this URI in your authenticator app (or type the secret), then enter the 6-digit code to confirm.</p>
+            {mfaUri && (
+              <pre className="mono" style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{mfaUri}</pre>
+            )}
+            <p className="meta">Secret: <code className="mono">{mfaSecret}</code></p>
+            <label>
+              Authenticator code
+              <input type="text" inputMode="numeric" required value={mfaCode} onChange={e => setMfaCode(e.target.value)} />
+            </label>
+            <Button type="submit" disabled={mfaBusy}>{mfaBusy ? 'Verifying…' : 'Verify & enable'}</Button>
+          </form>
+        ) : (
+          <form className="settings-form" onSubmit={enrollMfa}>
+            <p className="meta">TOTP authenticator. Enrollment completes only after you verify a code.</p>
+            <Button type="submit" disabled={mfaBusy}>{mfaBusy ? 'Starting…' : 'Start MFA enrollment'}</Button>
+          </form>
+        )}
+      </div>
+
+      {/* Sessions */}
+      <div style={{ marginTop: '1.5rem' }}>
+        <h3>Sessions</h3>
+        {sessions.length === 0 ? (
+          <p className="meta">No sessions found.</p>
+        ) : (
+          <>
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th>Session</th><th>IP</th><th>Created</th><th /></tr></thead>
+                <tbody>
+                  {sessions.map(s => (
+                    <tr key={s.id}>
+                      <td className="mono">{s.prefix || s.id.slice(0, 12) + '…'}{s.id === currentSession ? ' (this device)' : ''}</td>
+                      <td className="mono">{s.ip || '—'}</td>
+                      <td className="mono">{s.created_at ? new Date(s.created_at).toLocaleString() : '—'}</td>
+                      <td>
+                        {s.id !== currentSession && (
+                          <Button type="button" variant="ghost" size="sm" onClick={() => revokeSession(s.id)}>Revoke</Button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="row gap" style={{ marginTop: '0.5rem' }}>
+              <Button type="button" variant="secondary" size="sm" onClick={revokeOthers}>Revoke all other sessions</Button>
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* Organization */}
+      <div style={{ marginTop: '1.5rem' }}>
+        <h3>Organization</h3>
+        {orgs.length > 0 && (
+          <div className="row gap" style={{ marginBottom: '0.75rem', alignItems: 'center' }}>
+            <span className="meta">Active:</span>
+            {orgs.map(o => (
+              <Button key={o.id} type="button" size="sm"
+                variant={o.id === activeOrg ? 'default' : 'secondary'}
+                onClick={() => o.id !== activeOrg && switchOrg(o.id)}>
+                {o.name} · {o.role}
+              </Button>
+            ))}
+          </div>
+        )}
+        <h3 style={{ marginTop: '1rem' }}>Members</h3>
+        {members.length === 0 ? (
+          <p className="meta">No members listed (admin only).</p>
+        ) : (
+          <div className="table-wrap" style={{ marginBottom: '0.75rem' }}>
+            <table>
+              <thead><tr><th>Email</th><th>Name</th><th>Role</th><th /></tr></thead>
+              <tbody>
+                {members.map(m => (
+                  <tr key={m.id}>
+                    <td>{m.email}</td>
+                    <td>{m.name}</td>
+                    <td>
+                      <select value={m.role} onChange={e => setMemberRole(m.id, e.target.value)}
+                        style={{ background: 'transparent', border: '1px solid var(--border)', borderRadius: 4, padding: '2px 4px' }}>
+                        {['viewer', 'developer', 'maintainer', 'admin', 'owner'].map(r => (
+                          <option key={r} value={r}>{r}</option>
+                        ))}
+                      </select>
+                    </td>
+                    <td>
+                      <Button type="button" variant="ghost" size="sm" title="Remove" onClick={() => removeMember(m.id)}>
+                        <Trash2 size={14} />
+                      </Button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <form className="settings-form" onSubmit={inviteMember}>
+          <div className="grid-2">
+            <label>
+              Invite by email
+              <input type="email" required value={inviteEmail} onChange={e => setInviteEmail(e.target.value)} />
+            </label>
+            <label>
+              Role
+              <select value={inviteRole} onChange={e => setInviteRole(e.target.value)}>
+                {['viewer', 'developer', 'maintainer', 'admin'].map(r => (
+                  <option key={r} value={r}>{r}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <Button type="submit">Send invite</Button>
+        </form>
       </div>
     </div>
   )

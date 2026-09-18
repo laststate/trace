@@ -4,6 +4,47 @@ All notable changes to the LastState Trace backend.
 
 ## [Unreleased]
 
+### Security
+- **MFA enforced at login** - enrolled users must pass TOTP (or a single-use
+  emailed backup code); the password-minted session is revoked on any MFA
+  failure. Staged enroll (verify-to-confirm) + otpauth URI for QR setup.
+- **Reset/verify tokens hashed** - only SHA-256 hashes touch the DB; password
+  reset revokes all sessions.
+- **Session lifetime aligned** - cookie MaxAge 7d matches `sessions.expires_at`
+  (was 14d of dead cookie).
+- **Auth rate limits** - 20 req/min per IP on login/signup/register/forgot/
+  reset/verify/resend (global limiter unchanged).
+- **Password policy** - 12–128 chars (bcrypt truncation guard) + common-password
+  blocklist, enforced in store and endpoints.
+- **SAML hardening** - strict XML parsing, Conditions (audience/recipient/
+  time window) enforced, deflate-correct AuthnRequests. XMLDSig verification
+  still absent: ACS stays behind `TRACE_SAML_INSECURE` (prod-rejected).
+- **RBAC cleanup** - single rank source (`store.RoleRank`), dead ACL helpers
+  removed, org creation requires admin.
+
+### Added
+- **Email verification end-to-end** - tokens issued on register, verification
+  links point at `/verify-email`, new VerifyEmailPage.
+- **Invite emails** - `SendInviteEmail` with `/accept-invite?token=` link;
+  new AcceptInvitePage + route.
+- **MFA/session/org UI** - settings gains MFA enroll/verify/disable,
+  session list + revoke + revoke-others, org switcher, member
+  list/invite/role/remove; login shows MFA field + OIDC error codes;
+  401 bounces app views to `/login`.
+- **OIDC RP logout** - `GET /api/auth/oidc/logout` revokes locally and
+  continues to the provider `end_session_endpoint` when advertised;
+  callback failures redirect to `/login?error=` instead of blank JSON.
+- **SCIM 2.0 Users** - list (userName filter, pagination), create
+  (passwordless + membership), read, update (name/role/deprovision),
+  delete (membership removal); audit events; openapi paths fixed
+  (`/scim/v2/Users`, was wrong `/api/scim/...`); Groups still unimplemented.
+- **Auth audit completeness** - register, logout, forgot, reset, mfa_enroll,
+  mfa_disable, invite_accept, switch_org, session revocations, failed logins.
+- **Org switch cookie rotation** - `switch-org` rotates the session cookie
+  (was JSON-token only).
+- **Mailer in English** - verification/reset/MFA/invite templates translated;
+  links point at SPA pages.
+
 ### Added
 - **Real-time SSE stream** - `GET /api/stream` pushes overview snapshots every 3s (plus heartbeats)
   to the dashboard; the web client prefers `EventSource` and falls back to polling automatically.

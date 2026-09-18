@@ -160,13 +160,18 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 		Issuer: s.Cfg.OIDCIssuer, ClientID: s.Cfg.OIDCClientID,
 		ClientSecret: s.Cfg.OIDCClientSecret, RedirectURL: s.Cfg.OIDCRedirectURL,
 	}
+	// Browser-facing failures redirect to /login?error= so the SPA can
+	// render them; raw JSON here would strand the user on a blank page.
+	fail := func(code string) {
+		http.Redirect(w, r, "/login?error="+code, http.StatusFound)
+	}
 	if !cfg.Enabled() {
-		writeErr(w, 404, "oidc_disabled", "OIDC not configured", false)
+		fail("oidc_disabled")
 		return
 	}
 	c, err := r.Cookie("oidc_state")
 	if err != nil || c.Value == "" || c.Value != r.URL.Query().Get("state") {
-		writeErr(w, 400, "bad_state", "invalid oauth state", false)
+		fail("bad_state")
 		return
 	}
 	nonceC, _ := r.Cookie("oidc_nonce")
@@ -180,7 +185,7 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	code := r.URL.Query().Get("code")
 	if code == "" {
-		writeErr(w, 400, "missing_code", "no code", false)
+		fail("missing_code")
 		return
 	}
 	p, err := oidc.Discover(r.Context(), cfg.Issuer)
@@ -190,16 +195,16 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	tok, err := cfg.Exchange(r.Context(), p, code, verifier)
 	if err != nil {
-		writeErr(w, 502, "oidc_token", err.Error(), true)
+		fail("oidc_token")
 		return
 	}
 	claims, err := cfg.ValidateIDToken(r.Context(), p, tok.IDToken, nonce)
 	if err != nil {
-		writeErr(w, 401, "oidc_id_token", err.Error(), false)
+		fail("oidc_id_token")
 		return
 	}
 	if err := oidc.RequireVerified(claims.EmailVerified); err != nil {
-		writeErr(w, 403, "email_unverified", err.Error(), false)
+		fail("email_unverified")
 		return
 	}
 	email := claims.Email
@@ -208,18 +213,18 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 		// fall back to userinfo only if ID token lacked email
 		ui, uerr := cfg.UserInfo(r.Context(), p, tok.AccessToken)
 		if uerr != nil {
-			writeErr(w, 502, "oidc_userinfo", uerr.Error(), true)
+			fail("oidc_userinfo")
 			return
 		}
 		if err := oidc.RequireVerified(ui.EmailVerified); err != nil {
-			writeErr(w, 403, "email_unverified", err.Error(), false)
+			fail("email_unverified")
 			return
 		}
 		email, name = ui.Email, ui.Name
 	}
 	_, sess, secret, err := s.Store.UpsertOIDCUserOpts(r.Context(), email, name, s.Cfg.OIDCAutoJoin)
 	if err != nil {
-		writeErr(w, 403, "no_membership", err.Error(), false)
+		fail("no_membership")
 		return
 	}
 	uid := sess.UserID
@@ -232,6 +237,30 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 	// Prefer cookie session; hash token kept for legacy SPA bootstrap once
 	loc := "/overview"
 	http.Redirect(w, r, loc, http.StatusFound)
+}
+
+// oidcLogout revokes the local session and, when the provider advertises
+// an end_session_endpoint, continues logout there (RP-initiated logout).
+// Providers without one fall back to the local login page.
+func (s *Server) oidcLogout(w http.ResponseWriter, r *http.Request) {
+	if sess, ok := sessionFrom(s, r); ok {
+		_ = s.Store.RevokeSession(r.Context(), sess.SessionID, sess.UserID)
+		uid := sess.UserID
+		oid := sess.OrganizationID
+		s.Store.Audit(r.Context(), &uid, nil, &oid, nil, "auth.oidc_logout", "user", uid.String(), clientIP(r), r.UserAgent(), nil)
+	}
+	s.clearSessionCookie(w)
+	next := "/login"
+	cfg := oidc.Config{
+		Issuer: s.Cfg.OIDCIssuer, ClientID: s.Cfg.OIDCClientID,
+		ClientSecret: s.Cfg.OIDCClientSecret, RedirectURL: s.Cfg.OIDCRedirectURL,
+	}
+	if cfg.Enabled() {
+		if p, err := oidc.Discover(r.Context(), cfg.Issuer); err == nil && p.EndURL != "" {
+			next = p.EndURL + "?post_logout_redirect_uri=" + strings.TrimRight(s.Cfg.PublicURL, "/") + "/login&client_id=" + cfg.ClientID
+		}
+	}
+	http.Redirect(w, r, next, http.StatusFound)
 }
 
 func (s *Server) apiListOrgs(w http.ResponseWriter, r *http.Request) {
@@ -319,7 +348,20 @@ func (s *Server) apiInviteMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.Store.Audit(r.Context(), &by, nil, &sess.OrganizationID, nil, "org.invite", "invite", body.Email, clientIP(r), r.UserAgent(), map[string]any{"role": body.Role})
-	// return invite token once (email delivery is integration)
+	// Deliver the invite by email; the token is still returned once for
+	// API-driven flows (the email is the primary channel for humans).
+	orgName := ""
+	if orgs, oerr := s.Store.ListOrganizationsForUser(r.Context(), sess.UserID); oerr == nil {
+		for _, o := range orgs {
+			if id, _ := o["id"].(string); id == sess.OrganizationID.String() {
+				orgName, _ = o["name"].(string)
+				break
+			}
+		}
+	}
+	if err := s.Mailer.SendInviteEmail(r.Context(), body.Email, orgName, secret); err != nil {
+		s.Log.Warn("failed to send invite email", "email", body.Email, "error", err)
+	}
 	writeJSON(w, 201, map[string]any{"email": body.Email, "invite_token": secret})
 }
 

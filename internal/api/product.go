@@ -439,11 +439,6 @@ func (s *Server) apiQueryEvents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"items": items, "query": q, "total": len(items)})
 }
 
-func (s *Server) apiSCIMUsers(w http.ResponseWriter, r *http.Request) {
-	// SCIM is a stub — not enterprise-ready. Disabled by default messaging.
-	writeErr(w, 501, "scim_not_implemented", "SCIM 2.0 provisioning is a stub and not enabled for production use", false)
-}
-
 func (s *Server) apiSearchFull(w http.ResponseWriter, r *http.Request) {
 	p, err := s.project(r)
 	if err != nil {
@@ -527,6 +522,14 @@ func (s *Server) apiRegister(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "register_failed", err.Error(), false)
 		return
 	}
+	// Issue a verification email: without it the "check your email" promise
+	// in the UI would be false (tokens are upserted, raw value only in mail).
+	if token, err := s.Store.IssueVerificationToken(r.Context(), u.ID); err != nil {
+		s.Log.Warn("failed to issue verification token", "user", u.ID.String(), "error", err)
+	} else if err := s.Mailer.SendVerificationEmail(r.Context(), body.Email, token); err != nil {
+		s.Log.Warn("failed to send verification email", "email", body.Email, "error", err)
+	}
+	s.Store.Audit(r.Context(), &u.ID, nil, &org.OrganizationID, nil, "auth.register", "user", u.ID.String(), clientIP(r), r.UserAgent(), nil)
 	sess, secret, err := s.Store.MintSession(r.Context(), u, org.OrganizationID, "viewer")
 	if err != nil {
 		writeErr(w, 500, "internal", err.Error(), true)
@@ -548,6 +551,7 @@ func (s *Server) apiLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = s.Store.RevokeSession(r.Context(), sess.SessionID, sess.UserID)
+	s.Store.Audit(r.Context(), &sess.UserID, nil, &sess.OrganizationID, nil, "auth.logout", "user", sess.UserID.String(), clientIP(r), r.UserAgent(), nil)
 	writeJSON(w, 200, map[string]string{"status": "logged_out"})
 }
 
@@ -737,6 +741,7 @@ func (s *Server) apiAcceptInvite(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "invite_failed", err.Error(), false)
 		return
 	}
+	s.Store.Audit(r.Context(), &sess.UserID, nil, &sess.OrganizationID, nil, "auth.invite_accept", "user", sess.UserID.String(), clientIP(r), r.UserAgent(), nil)
 	writeJSON(w, 200, map[string]any{
 		"token": secret,
 		"user":  map[string]any{"id": sess.UserID, "email": sess.Email, "role": sess.Role},

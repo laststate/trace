@@ -58,6 +58,8 @@ const LoginPage = lazy(() => import('./views/auth').then(m => ({ default: m.Logi
 const RegisterPage = lazy(() => import('./views/auth').then(m => ({ default: m.RegisterPage })))
 const ForgotPasswordPage = lazy(() => import('./views/auth').then(m => ({ default: m.ForgotPasswordPage })))
 const ResetPasswordPage = lazy(() => import('./views/auth').then(m => ({ default: m.ResetPasswordPage })))
+const VerifyEmailPage = lazy(() => import('./views/auth').then(m => ({ default: m.VerifyEmailPage })))
+const AcceptInvitePage = lazy(() => import('./views/auth').then(m => ({ default: m.AcceptInvitePage })))
 
 function LazyPage({ children }: { children: React.ReactNode }) {
   return <Suspense fallback={<BootSplash label="Loading page…" />}>{children}</Suspense>
@@ -130,6 +132,8 @@ export default function App() {
       <Route path="/register" element={<LazyPage><RegisterPage /></LazyPage>} />
       <Route path="/forgot-password" element={<LazyPage><ForgotPasswordPage /></LazyPage>} />
       <Route path="/reset-password" element={<LazyPage><ResetPasswordPage /></LazyPage>} />
+      <Route path="/verify-email" element={<LazyPage><VerifyEmailPage /></LazyPage>} />
+      <Route path="/accept-invite" element={<LazyPage><AcceptInvitePage /></LazyPage>} />
       {/* Standalone marketing pages (static routes win over /:view) */}
       <Route path="/landing" element={<LazyPage><LandingPage /></LazyPage>} />
       <Route path="/blog" element={<LazyPage><BlogPage /></LazyPage>} />

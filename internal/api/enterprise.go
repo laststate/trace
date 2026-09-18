@@ -307,13 +307,26 @@ func (s *Server) apiSAMLACS(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := r.FormValue("SAMLResponse")
 	org, _ := s.orgFrom(r)
+	entityID := s.Cfg.PublicURL + "/saml/metadata"
+	acsURL := s.Cfg.PublicURL + "/saml/acs"
 	cert := ""
 	if org != uuid.Nil {
 		if sc, err := s.Store.GetSAMLConfig(r.Context(), org); err == nil {
 			cert = sc.CertificatePEM
+			if sc.EntityID != "" {
+				entityID = sc.EntityID
+			}
+			if sc.ACSURL != "" {
+				acsURL = sc.ACSURL
+			}
 		}
 	}
-	a, err := saml.ParseResponse(resp, cert != "", cert)
+	a, err := saml.ParseResponse(resp, saml.VerifyOpts{
+		RequireCert: cert != "",
+		CertPEM:     cert,
+		EntityID:    entityID,
+		ACSURL:      acsURL,
+	})
 	if err != nil {
 		writeErr(w, 400, "saml_assert", err.Error(), false)
 		return

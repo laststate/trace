@@ -26,6 +26,7 @@ const (
 	KindVerification = "verification"
 	KindReset        = "reset"
 	KindMfaCode      = "mfa_code"
+	KindInvite       = "invite"
 )
 
 // Mailer is the interface for sending emails.
@@ -33,6 +34,7 @@ type Mailer interface {
 	SendVerificationEmail(ctx context.Context, email, verifyToken string) error
 	SendResetEmail(ctx context.Context, email, resetToken string) error
 	SendMfaCode(ctx context.Context, email, mfaCode string) error
+	SendInviteEmail(ctx context.Context, email, orgName, inviteToken string) error
 }
 
 // SMTPMailer is the production mailer that sends emails via SMTP.
@@ -59,17 +61,17 @@ func (m *SMTPMailer) SendVerificationEmail(ctx context.Context, email, verifyTok
 			"email", email, "token", verifyToken)
 		return m.logAndPersist(ctx, nil, KindVerification, email, "pending")
 	}
-	subject := "Verifique seu email - LastState"
-	body := fmt.Sprintf(`Olá,
+	subject := "Verify your email - LastState"
+	body := fmt.Sprintf(`Hi,
 
-Por favor, verifique seu email clicando no link abaixo:
+Please verify your email by clicking the link below:
 
-%s/api/auth/verify-email?token=%s
+%s/verify-email?token=%s
 
-Se você não criou uma conta no LastState, ignore este email.
+If you didn't create a LastState account, ignore this email.
 
-Atenciosamente,
-Equipe LastState`, m.cfg.PublicURL, verifyToken)
+Best,
+LastState team`, m.cfg.PublicURL, verifyToken)
 	return m.send(ctx, email, subject, body)
 }
 
@@ -80,17 +82,17 @@ func (m *SMTPMailer) SendResetEmail(ctx context.Context, email, resetToken strin
 			"email", email, "token", resetToken)
 		return m.logAndPersist(ctx, nil, KindReset, email, "pending")
 	}
-	subject := "Redefinição de senha - LastState"
-	body := fmt.Sprintf(`Olá,
+	subject := "Password reset - LastState"
+	body := fmt.Sprintf(`Hi,
 
-Recebemos uma solicitação de redefinição de senha. Clique no link abaixo para redefinir:
+We received a password reset request. Click the link below to reset it:
 
-%s/api/auth/reset-password?token=%s
+%s/reset-password?token=%s
 
-Se você não solicitou a redefinição, ignore este email. O link expira em 1 hora.
+If you didn't request this, ignore this email. The link expires in 1 hour.
 
-Atenciosamente,
-Equipe LastState`, m.cfg.PublicURL, resetToken)
+Best,
+LastState team`, m.cfg.PublicURL, resetToken)
 	return m.send(ctx, email, subject, body)
 }
 
@@ -101,15 +103,36 @@ func (m *SMTPMailer) SendMfaCode(ctx context.Context, email, mfaCode string) err
 			"email", email, "code", mfaCode)
 		return m.logAndPersist(ctx, nil, KindMfaCode, email, "pending")
 	}
-	subject := "Seu código MFA - LastState"
-	body := fmt.Sprintf(`Olá,
+	subject := "Your MFA code - LastState"
+	body := fmt.Sprintf(`Hi,
 
-Seu código MFA é: %s
+Your MFA code is: %s
 
-Este código expira em 10 minutos. Se você não solicitou este código, ignore este email.
+This code expires in 10 minutes. If you didn't request it, ignore this email.
 
-Atenciosamente,
-Equipe LastState`, mfaCode)
+Best,
+LastState team`, mfaCode)
+	return m.send(ctx, email, subject, body)
+}
+
+// SendInviteEmail sends an organization invitation with an accept link.
+func (m *SMTPMailer) SendInviteEmail(ctx context.Context, email, orgName, inviteToken string) error {
+	if !m.isConfigured() {
+		m.logger.Info("smtp not configured, logging invite email",
+			"email", email, "org", orgName)
+		return m.logAndPersist(ctx, nil, KindInvite, email, "pending")
+	}
+	subject := "You've been invited to " + orgName + " on LastState"
+	body := fmt.Sprintf(`Hi,
+
+You've been invited to join %s on LastState Trace.
+
+Accept here (set your name and password):
+
+%s/accept-invite?token=%s
+
+Best,
+LastState team`, orgName, m.cfg.PublicURL, inviteToken)
 	return m.send(ctx, email, subject, body)
 }
 

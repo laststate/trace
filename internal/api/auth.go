@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 
@@ -31,14 +30,10 @@ func (s *Server) requireRole(role string) func(http.Handler) http.Handler {
 	}
 }
 
-// roleRanks is the single canonical source of truth for role-to-rank mapping.
-// All role comparison logic across the api package must reference this map.
-var roleRanks = map[string]int{
-	"viewer":     1,
-	"developer":  2,
-	"maintainer": 3,
-	"admin":      4,
-	"owner":      5,
+// roleRanks resolves through the store's canonical hierarchy (single source
+// of truth shared with store.Session.Can).
+func userRoleRank(role string) (int, bool) {
+	return store.RoleRank(role)
 }
 
 // userHasRole checks if a user has the required minimum role for the action.
@@ -49,17 +44,13 @@ func (s *Server) userHasRole(sess store.Session, requiredRole string) bool {
 	if userRole == "" {
 		userRole = "viewer"
 	}
-	requiredRank, ok := roleRanks[requiredRole]
+	requiredRank, ok := userRoleRank(requiredRole)
 	if !ok {
-		requiredRank = roleRanks["viewer"]
+		requiredRank, _ = userRoleRank("viewer")
 	}
-	userRank, ok := roleRanks[userRole]
+	userRank, ok := userRoleRank(userRole)
 	if !ok {
 		return false // unknown role — fail closed
 	}
 	return userRank >= requiredRank
 }
-
-// unused import guard keeps the json package available for the file's helpers
-// that may be added in subsequent phases (e.g. password reset request body).
-var _ = json.Marshal

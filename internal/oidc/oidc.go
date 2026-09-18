@@ -37,6 +37,7 @@ type Provider struct {
 	TokenURL string `json:"token_endpoint"`
 	UserURL  string `json:"userinfo_endpoint"`
 	JWKSURL  string `json:"jwks_uri"`
+	EndURL   string `json:"end_session_endpoint"`
 }
 
 func Discover(ctx context.Context, issuer string) (Provider, error) {

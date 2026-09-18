@@ -1,9 +1,14 @@
 // Package saml implements a minimal SAML 2.0 SP (Service Provider) surface:
-// metadata XML + ACS assertion consumer stub with basic signature-optional parsing.
-// Not a full SAML suite — enough to wire Okta/Azure AD for login smoke tests.
+// metadata XML + a strict-XML assertion consumer with enforced Conditions
+// (audience, recipient, time window). XML signature *verification* is NOT
+// implemented — ACS stays behind TRACE_SAML_INSECURE (rejected in
+// production) until a certified XMLDSig library lands. Never treat this
+// path as production SSO.
 package saml
 
 import (
+	"bytes"
+	"compress/flate"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/xml"
@@ -48,7 +53,13 @@ func (c Config) RedirectURL(relayState string) (string, error) {
   AssertionConsumerServiceURL="%s" ProtocolBinding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST">
   <saml:Issuer>%s</saml:Issuer>
 </samlp:AuthnRequest>`, id, time.Now().UTC().Format(time.RFC3339), c.IDPSSOURL, c.ACSURL, c.EntityID)
-	enc := base64.StdEncoding.EncodeToString([]byte(req))
+	// HTTP-Redirect binding: raw DEFLATE then base64 (plain base64 breaks
+	// strict IdPs).
+	deflated, err := deflateRaw([]byte(req))
+	if err != nil {
+		return "", err
+	}
+	enc := base64.StdEncoding.EncodeToString(deflated)
 	u, err := url.Parse(c.IDPSSOURL)
 	if err != nil {
 		return "", err
@@ -62,6 +73,22 @@ func (c Config) RedirectURL(relayState string) (string, error) {
 	return u.String(), nil
 }
 
+// deflateRaw compresses per the HTTP-Redirect binding (RFC 1951 raw DEFLATE).
+func deflateRaw(in []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	w, err := flate.NewWriter(&buf, flate.DefaultCompression)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := w.Write(in); err != nil {
+		return nil, err
+	}
+	if err := w.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
 // Assertion is a minimal parsed response.
 type Assertion struct {
 	NameID       string
@@ -70,9 +97,55 @@ type Assertion struct {
 	NotOnOrAfter time.Time
 }
 
-// ParseResponse decodes base64 SAMLResponse and extracts NameID/email without crypto verify
-// (verify when certificate configured — stub checks presence only).
-func ParseResponse(b64 string, requireCert bool, certPEM string) (Assertion, error) {
+// VerifyOpts are the SP-side expectations enforced on every assertion.
+// Signature *verification* is out of scope (see package doc); presence of
+// a Signature element is required whenever a certificate is configured.
+type VerifyOpts struct {
+	RequireCert bool
+	CertPEM     string
+	EntityID    string // expected Audience
+	ACSURL      string // expected Recipient/Destination
+	// Skew allows clock drift between SP and IdP.
+	Skew time.Duration
+}
+
+type samlResponse struct {
+	XMLName     xml.Name      `xml:"Response"`
+	Destination string        `xml:"Destination,attr"`
+	Assertion   samlAssertion `xml:"Assertion"`
+}
+
+type samlAssertion struct {
+	Subject struct {
+		NameID struct {
+			Format string `xml:"Format,attr"`
+			Value  string `xml:",chardata"`
+		} `xml:"NameID"`
+		SubjectConfirmation struct {
+			Data struct {
+				Recipient    string `xml:"Recipient,attr"`
+				InResponseTo string `xml:"InResponseTo,attr"`
+				NotOnOrAfter string `xml:"NotOnOrAfter,attr"`
+			} `xml:"SubjectConfirmationData"`
+		} `xml:"SubjectConfirmation"`
+	} `xml:"Subject"`
+	Conditions struct {
+		NotBefore    string `xml:"NotBefore,attr"`
+		NotOnOrAfter string `xml:"NotOnOrAfter,attr"`
+		Audience     []struct {
+			Value string `xml:",chardata"`
+		} `xml:"AudienceRestriction>Audience"`
+	} `xml:"Conditions"`
+	Attributes []struct {
+		Name   string   `xml:"Name,attr"`
+		Values []string `xml:"AttributeValue"`
+	} `xml:"AttributeStatement>Attribute"`
+}
+
+// ParseResponse decodes a base64 SAMLResponse, parses it as XML (never
+// substring matching), and enforces Conditions: time window, audience,
+// and recipient. Returns the subject email on success.
+func ParseResponse(b64 string, opts VerifyOpts) (Assertion, error) {
 	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(b64))
 	if err != nil {
 		// some IdPs use URL encoding
@@ -81,46 +154,99 @@ func ParseResponse(b64 string, requireCert bool, certPEM string) (Assertion, err
 			return Assertion{}, fmt.Errorf("saml response b64: %w", err)
 		}
 	}
-	if requireCert && strings.TrimSpace(certPEM) == "" {
+	if opts.RequireCert && strings.TrimSpace(opts.CertPEM) == "" {
 		return Assertion{}, fmt.Errorf("saml certificate required")
 	}
-	// Soft parse: look for NameID and Attribute email
-	s := string(raw)
-	a := Assertion{SessionID: randomHex(8)}
-	if i := strings.Index(s, "<saml:NameID"); i >= 0 {
-		if j := strings.Index(s[i:], ">"); j >= 0 {
-			rest := s[i+j+1:]
-			if k := strings.Index(rest, "</"); k >= 0 {
-				a.NameID = strings.TrimSpace(rest[:k])
-				a.Email = a.NameID
+	var resp samlResponse
+	dec := xml.NewDecoder(bytes.NewReader(raw))
+	dec.Strict = true
+	dec.Entity = xml.HTMLEntity
+	if err := dec.Decode(&resp); err != nil {
+		return Assertion{}, fmt.Errorf("saml response xml: %w", err)
+	}
+	skew := opts.Skew
+	if skew <= 0 {
+		skew = 5 * time.Minute
+	}
+	now := time.Now()
+	// Conditions window.
+	if resp.Assertion.Conditions.NotOnOrAfter != "" {
+		if exp, err := time.Parse(time.RFC3339, resp.Assertion.Conditions.NotOnOrAfter); err == nil {
+			if now.After(exp.Add(skew)) {
+				return Assertion{}, fmt.Errorf("saml assertion expired")
 			}
+		} else {
+			return Assertion{}, fmt.Errorf("saml bad Conditions NotOnOrAfter")
 		}
 	}
-	if a.Email == "" {
-		// AttributeStatement email
-		for _, key := range []string{"email", "mail", "Email"} {
-			if i := strings.Index(strings.ToLower(s), strings.ToLower(key)); i >= 0 {
-				// crude extract next >value<
-				if j := strings.Index(s[i:], ">"); j >= 0 {
-					rest := s[i+j+1:]
-					if k := strings.Index(rest, "<"); k > 0 {
-						val := strings.TrimSpace(rest[:k])
-						if strings.Contains(val, "@") {
-							a.Email = val
-							break
-						}
-					}
+	if resp.Assertion.Conditions.NotBefore != "" {
+		if nb, err := time.Parse(time.RFC3339, resp.Assertion.Conditions.NotBefore); err == nil {
+			if now.Add(skew).Before(nb) {
+				return Assertion{}, fmt.Errorf("saml assertion not yet valid")
+			}
+		} else {
+			return Assertion{}, fmt.Errorf("saml bad Conditions NotBefore")
+		}
+	}
+	// Audience must include our entity ID.
+	if opts.EntityID != "" {
+		matched := false
+		for _, a := range resp.Assertion.Conditions.Audience {
+			if strings.TrimSpace(a.Value) == opts.EntityID {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return Assertion{}, fmt.Errorf("saml audience mismatch")
+		}
+	}
+	// Recipient must be our ACS.
+	if opts.ACSURL != "" {
+		got := strings.TrimSpace(resp.Assertion.Subject.SubjectConfirmation.Data.Recipient)
+		if got != "" && got != opts.ACSURL {
+			return Assertion{}, fmt.Errorf("saml recipient mismatch")
+		}
+	}
+	// Subject confirmation expiry.
+	if noa := resp.Assertion.Subject.SubjectConfirmation.Data.NotOnOrAfter; noa != "" {
+		if exp, err := time.Parse(time.RFC3339, noa); err == nil {
+			if now.After(exp.Add(skew)) {
+				return Assertion{}, fmt.Errorf("saml subject confirmation expired")
+			}
+		} else {
+			return Assertion{}, fmt.Errorf("saml bad SubjectConfirmation NotOnOrAfter")
+		}
+	}
+	// Email: NameID first, then mail attributes.
+	email := strings.TrimSpace(resp.Assertion.Subject.NameID.Value)
+	if email == "" || !strings.Contains(email, "@") {
+		email = ""
+		for _, attr := range resp.Assertion.Attributes {
+			lname := strings.ToLower(attr.Name)
+			if !strings.Contains(lname, "email") && !strings.Contains(lname, "mail") {
+				continue
+			}
+			for _, v := range attr.Values {
+				if strings.Contains(v, "@") {
+					email = strings.TrimSpace(v)
+					break
 				}
 			}
+			if email != "" {
+				break
+			}
 		}
 	}
-	if a.Email == "" {
-		// last resort: any email-like token
+	if email == "" {
 		return Assertion{}, fmt.Errorf("saml: no NameID/email in assertion")
 	}
-	a.NotOnOrAfter = time.Now().Add(8 * time.Hour)
-	_ = xml.Header // keep encoding/xml imported for future strict parse
-	return a, nil
+	return Assertion{
+		NameID:       strings.TrimSpace(resp.Assertion.Subject.NameID.Value),
+		Email:        email,
+		SessionID:    randomHex(8),
+		NotOnOrAfter: now.Add(time.Hour),
+	}, nil
 }
 
 func randomHex(n int) string {

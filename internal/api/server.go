@@ -96,7 +96,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/artifacts", s.uploadArtifact)
 	mux.HandleFunc("POST /v1/relay/heartbeat", s.relayHeartbeat)
 
-	mux.HandleFunc("POST /api/auth/login", s.login)
+	mux.HandleFunc("POST /api/auth/login", s.limitAuth(s.login))
 	mux.HandleFunc("POST /api/auth/logout", s.requireUI(s.apiLogout, "viewer"))
 	mux.HandleFunc("GET /api/me", s.me)
 	mux.HandleFunc("GET /api/jobs/dead", s.requireUI(s.apiDeadJobs, "admin"))
@@ -115,6 +115,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/query/events", s.requireUI(s.apiQueryEvents, "viewer"))
 	mux.HandleFunc("GET /scim/v2/Users", s.requireUI(s.apiSCIMUsers, "admin"))
 	mux.HandleFunc("POST /scim/v2/Users", s.requireUI(s.apiSCIMUsers, "admin"))
+	mux.HandleFunc("GET /scim/v2/Users/{id}", s.requireUI(s.apiSCIMUser, "admin"))
+	mux.HandleFunc("PUT /scim/v2/Users/{id}", s.requireUI(s.apiSCIMUser, "admin"))
+	mux.HandleFunc("PATCH /scim/v2/Users/{id}", s.requireUI(s.apiSCIMUser, "admin"))
+	mux.HandleFunc("DELETE /scim/v2/Users/{id}", s.requireUI(s.apiSCIMUser, "admin"))
 	mux.HandleFunc("GET /api/oncall", s.requireUI(s.apiOncall, "viewer"))
 	mux.HandleFunc("POST /api/oncall", s.requireUI(s.apiOncall, "admin"))
 	mux.HandleFunc("POST /api/oncall/shifts", s.requireUI(s.apiOncallShift, "admin"))
@@ -157,8 +161,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/tokens", s.requireUI(s.apiCreateToken, "admin"))
 	mux.HandleFunc("GET /api/tokens", s.requireUI(s.apiListTokens, "admin"))
 	mux.HandleFunc("DELETE /api/tokens/{id}", s.requireUI(s.apiRevokeToken, "admin"))
-	mux.HandleFunc("POST /api/auth/register", s.apiRegister)
-	mux.HandleFunc("POST /api/auth/invite/accept", s.apiAcceptInvite)
+	mux.HandleFunc("POST /api/auth/register", s.limitAuth(s.apiRegister))
+	mux.HandleFunc("POST /api/auth/invite/accept", s.limitAuth(s.apiAcceptInvite))
 	mux.HandleFunc("GET /api/bootstrap", s.apiBootstrapInfo)
 	mux.HandleFunc("GET /api/alerts", s.requireUI(s.apiAlerts, "viewer"))
 	mux.HandleFunc("POST /api/alerts", s.requireUI(s.apiCreateAlert, "admin"))
@@ -168,17 +172,20 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/channels", s.requireUI(s.apiCreateChannel, "admin"))
 	mux.HandleFunc("GET /api/auth/oidc/login", s.oidcLogin)
 	mux.HandleFunc("GET /api/auth/oidc/callback", s.oidcCallback)
+	mux.HandleFunc("GET /api/auth/oidc/logout", s.oidcLogout)
 
-	// Phase 3: Self-service auth endpoints.
-	mux.HandleFunc("POST /api/auth/signup", s.apiSignup)
-	mux.HandleFunc("POST /api/auth/verify-email", s.apiVerifyEmail)
-	mux.HandleFunc("POST /api/auth/forgot-password", s.apiForgotPassword)
-	mux.HandleFunc("POST /api/auth/reset-password", s.apiResetPassword)
+	// Phase 3: Self-service auth endpoints. Credential-adjacent routes get a
+	// strict per-IP limiter (20/min) on top of the global one: login,
+	// signup, and code-verification endpoints are brute-force targets.
+	mux.HandleFunc("POST /api/auth/signup", s.limitAuth(s.apiSignup))
+	mux.HandleFunc("POST /api/auth/verify-email", s.limitAuth(s.apiVerifyEmail))
+	mux.HandleFunc("POST /api/auth/forgot-password", s.limitAuth(s.apiForgotPassword))
+	mux.HandleFunc("POST /api/auth/reset-password", s.limitAuth(s.apiResetPassword))
 	mux.Handle("GET /api/auth/mfa/status", s.requireAuth(http.HandlerFunc(s.apiMfaStatus)))
 	mux.Handle("POST /api/auth/mfa/enroll", s.requireAuth(http.HandlerFunc(s.apiMfaEnroll)))
 	mux.Handle("POST /api/auth/mfa/verify", s.requireAuth(http.HandlerFunc(s.apiMfaVerify)))
 	mux.Handle("POST /api/auth/mfa/disable", s.requireAuth(http.HandlerFunc(s.apiMfaDisable)))
-	mux.HandleFunc("POST /api/auth/mfa/resend-code", s.apiMfaResendCode)
+	mux.HandleFunc("POST /api/auth/mfa/resend-code", s.limitAuth(s.apiMfaResendCode))
 
 	// Phase 3: Export and onboarding endpoints.
 	mux.Handle("POST /api/webhooks/export", s.requireAuth(http.HandlerFunc(s.apiCreateExport)))
@@ -216,7 +223,7 @@ func (s *Server) Handler() http.Handler {
 
 	// Orgs / projects / relays / hardware
 	mux.HandleFunc("GET /api/organizations", s.requireUI(s.apiListOrgs, "viewer"))
-	mux.HandleFunc("POST /api/organizations", s.requireUI(s.apiCreateOrg, "viewer"))
+	mux.HandleFunc("POST /api/organizations", s.requireUI(s.apiCreateOrg, "admin"))
 	mux.HandleFunc("PATCH /api/organizations", s.requireUI(s.apiUpdateOrg, "admin"))
 	mux.HandleFunc("GET /api/organizations/members", s.requireUI(s.apiListMembers, "admin"))
 	mux.HandleFunc("POST /api/organizations/members", s.requireUI(s.apiInviteMember, "admin"))
@@ -372,7 +379,7 @@ func (s *Server) capabilities(w http.ResponseWriter, _ *http.Request) {
 		"server_id":       "trace-v" + s.Cfg.AppVersion,
 		"oidc":            s.Cfg.OIDCIssuer != "",
 		"saml":            false, // experimental; not enterprise-ready
-		"scim":            false, // stub only
+		"scim":            true,  // Users minimal profile (list/create/read/update/deprovision); Groups unimplemented
 		"public_register": s.Cfg.AllowPublicRegister,
 		"queue":           s.Cfg.QueueDriver,
 		"deployment":      s.Cfg.Deployment,
@@ -889,10 +896,14 @@ func (s *Server) project(r *http.Request) (store.Project, error) {
 }
 
 // login handles user login with account lockout protection.
+// When the user enrolled MFA, a TOTP code (mfa_code) is required: without it
+// the just-minted session is revoked and the API answers mfa_required —
+// a password alone never completes login for MFA users.
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Email    string `json:"email"`
 		Password string `json:"password"`
+		MfaCode  string `json:"mfa_code"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, 400, "invalid_json", err.Error(), false)
@@ -918,24 +929,8 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 
 	sess, secret, err := s.Store.Login(r.Context(), body.Email, body.Password)
 	if err != nil {
-		s.loginLockoutMu.Lock()
-		if s.loginLockout == nil {
-			s.loginLockout = make(map[string]loginLockoutEntry)
-		}
-		entry := loginLockoutEntry{
-			FirstFailedAt: time.Now(),
-			FailedCount:   1,
-		}
-		if existing, ok := s.loginLockout[body.Email]; ok {
-			entry.FailedCount = existing.FailedCount + 1
-			entry.FirstFailedAt = existing.FirstFailedAt
-		}
-		if entry.FailedCount >= maxFailedLogins {
-			entry.LockedUntil = time.Now().Add(lockoutWindow)
-		}
-		s.loginLockout[body.Email] = entry
-		s.loginLockoutMu.Unlock()
-
+		s.recordFailedLogin(body.Email)
+		s.Store.Audit(r.Context(), nil, nil, nil, nil, "auth.login_failed", "user", body.Email, clientIP(r), r.UserAgent(), nil)
 		writeErr(w, 401, "invalid_credentials", "invalid email or password", false)
 		return
 	}
@@ -944,6 +939,9 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	s.loginLockoutMu.Unlock()
 	if err != nil {
 		writeErr(w, 401, "invalid_credentials", "invalid email or password", false)
+		return
+	}
+	if err := s.enforceLoginMFA(w, r, sess, body.MfaCode, body.Email); err != nil {
 		return
 	}
 	uid := sess.UserID
@@ -956,6 +954,61 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// recordFailedLogin bumps the in-memory lockout counter for an identifier.
+func (s *Server) recordFailedLogin(email string) {
+	const maxFailedLogins = 5
+	const lockoutWindow = 5 * time.Minute
+	s.loginLockoutMu.Lock()
+	defer s.loginLockoutMu.Unlock()
+	if s.loginLockout == nil {
+		s.loginLockout = make(map[string]loginLockoutEntry)
+	}
+	entry := loginLockoutEntry{
+		FirstFailedAt: time.Now(),
+		FailedCount:   1,
+	}
+	if existing, ok := s.loginLockout[email]; ok {
+		entry.FailedCount = existing.FailedCount + 1
+		entry.FirstFailedAt = existing.FirstFailedAt
+	}
+	if entry.FailedCount >= maxFailedLogins {
+		entry.LockedUntil = time.Now().Add(lockoutWindow)
+	}
+	s.loginLockout[email] = entry
+}
+
+// enforceLoginMFA completes the second factor for MFA-enrolled users.
+// The password step already minted a session: on any MFA failure that
+// session is revoked so a password alone never yields access.
+func (s *Server) enforceLoginMFA(w http.ResponseWriter, r *http.Request, sess store.Session, code, email string) error {
+	enabled, err := s.Store.IsMFAEnabled(r.Context(), sess.UserID)
+	if err != nil {
+		writeErr(w, 500, "mfa_check_failed", "could not verify MFA status", false)
+		return err
+	}
+	if !enabled {
+		return nil
+	}
+	fail := func(code, msg string) error {
+		_ = s.Store.RevokeSession(r.Context(), sess.SessionID, sess.UserID)
+		writeErr(w, 401, code, msg, false)
+		return fmt.Errorf("%s", code)
+	}
+	if code == "" {
+		return fail("mfa_required", "multi-factor code required")
+	}
+	// Primary: TOTP. Fallback: single-use emailed code (account recovery).
+	secret, err := s.Store.GetMfaSecret(r.Context(), sess.UserID)
+	if err == nil && auth.ValidateTOTPCode(secret, code) {
+		return nil
+	}
+	if err := s.Store.ConsumeEmailCode(r.Context(), sess.UserID, code); err != nil {
+		s.recordFailedLogin(email)
+		return fail("mfa_invalid", "invalid multi-factor code")
+	}
+	return nil
+}
+
 func (s *Server) setSessionCookie(w http.ResponseWriter, secret string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     "trace_session",
@@ -964,7 +1017,8 @@ func (s *Server) setSessionCookie(w http.ResponseWriter, secret string) {
 		HttpOnly: true,
 		Secure:   s.Cfg.CookieSecure,
 		SameSite: http.SameSiteLaxMode,
-		MaxAge:   60 * 60 * 24 * 14,
+		// Matches the DB session lifetime (sessions.expires_at = now + 7 days).
+		MaxAge: 60 * 60 * 24 * 7,
 	})
 }
 

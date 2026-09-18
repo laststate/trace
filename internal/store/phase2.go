@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -113,13 +114,43 @@ func (s *Store) firstOrg(ctx context.Context) (Org, error) {
 	return o, err
 }
 
+// CheckPasswordPolicy enforces length bounds. The 128-byte ceiling exists
+// because bcrypt silently truncates past 72 bytes — without it, "password…X"
+// and "password…Y" would hash identically.
+func CheckPasswordPolicy(password string) error {
+	if len(password) < 12 {
+		return errors.New("password must be at least 12 characters")
+	}
+	if len(password) > 128 {
+		return errors.New("password must be at most 128 characters")
+	}
+	lower := strings.ToLower(password)
+	for _, banned := range breachedPasswords {
+		if lower == banned {
+			return errors.New("password is too common; choose a less predictable one")
+		}
+	}
+	return nil
+}
+
+// breachedPasswords is a minimal blocklist of the most-abused passwords.
+// Exact match only (no substring games that would annoy legitimate users).
+var breachedPasswords = []string{
+	"password1234", "password12345", "password123456", "qwerty123456",
+	"123456789012", "123456789013", "letmein12345", "welcome12345",
+	"admin1234567", "changeme1234", "changeme12345", "test12345678",
+	"p@ssw0rd1234", "p@ssw0rd12345", "iloveyou1234", "dragon123456",
+	"monkey123456", "football1234", "baseball1234", "superman1234",
+	"trustno1binding", "correcthorsebatterystaple",
+}
+
 // CreateUser creates a password user and membership in org.
 func (s *Store) CreateUser(ctx context.Context, orgID uuid.UUID, email, password, name, role string) (User, error) {
 	if role == "" {
 		role = "developer"
 	}
-	if len(password) < 12 {
-		return User{}, errors.New("password must be at least 12 characters")
+	if err := CheckPasswordPolicy(password); err != nil {
+		return User{}, err
 	}
 	ph, err := HashPassword(password)
 	if err != nil {
@@ -295,9 +326,23 @@ ORDER BY m.created_at ASC LIMIT 1`, prefix).
 	return Session{UserID: uid, Email: email, Name: name, OrganizationID: orgID, Role: role, SessionID: sid}, nil
 }
 
+// roleRanks is the canonical role hierarchy. The api layer resolves ranks
+// through RoleRank so both layers share one source of truth.
+var roleRanks = map[string]int{
+	"viewer": 1, "developer": 2, "maintainer": 3, "admin": 4, "owner": 5,
+	"billing": 1,
+}
+
+// RoleRank returns the rank for a role (ok=false for unknown roles).
+func RoleRank(role string) (int, bool) {
+	rank, ok := roleRanks[role]
+	return rank, ok
+}
+
 func roleAtLeast(role, need string) bool {
-	rank := map[string]int{"viewer": 1, "developer": 2, "maintainer": 3, "admin": 4, "owner": 5, "billing": 1}
-	return rank[role] >= rank[need]
+	rank, _ := RoleRank(role)
+	needRank, _ := RoleRank(need)
+	return rank >= needRank
 }
 
 func (s Session) Can(need string) bool { return roleAtLeast(s.Role, need) }

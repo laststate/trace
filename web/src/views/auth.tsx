@@ -37,10 +37,15 @@ function AuthError({ toast }: { toast: AuthToast }) {
 
 export function LoginPage() {
   const navigate = useNavigate()
-  const [email, setEmail] = useState('admin@localhost')
+  const [searchParams] = useSearchParams()
+  const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [mfaCode, setMfaCode] = useState('')
+  const [needMfa, setNeedMfa] = useState(false)
   const [busy, setBusy] = useState(false)
   const [toast, setToast] = useState<AuthToast>(null)
+
+  const oidcError = searchParams.get('error')
 
   async function submit(e?: React.FormEvent) {
     e?.preventDefault()
@@ -48,11 +53,22 @@ export function LoginPage() {
     setBusy(true)
     setToast(null)
     try {
-      const res = await api('/api/auth/login', { method: 'POST', body: { email, password } })
+      const body: Record<string, string> = { email, password }
+      if (needMfa && mfaCode) body.mfa_code = mfaCode
+      const res = await api('/api/auth/login', { method: 'POST', body })
       setToken(res.token)
       window.location.assign('/overview')
     } catch (err: any) {
-      setToast({ type: 'error', message: err.message || 'Login failed' })
+      const code = (err as any)?.code
+      if (code === 'mfa_required') {
+        setNeedMfa(true)
+        setToast({ type: 'info', message: 'This account uses MFA — enter your authenticator code.' })
+      } else if (code === 'mfa_invalid') {
+        setNeedMfa(true)
+        setToast({ type: 'error', message: 'Invalid authenticator code. Try again.' })
+      } else {
+        setToast({ type: 'error', message: err.message || 'Login failed' })
+      }
       setBusy(false)
     }
   }
@@ -80,14 +96,26 @@ export function LoginPage() {
           <input data-testid="login-password" type="password" autoComplete="current-password" required
             value={password} onChange={e => setPassword(e.target.value)} />
         </label>
+        {needMfa && (
+          <label>
+            Authenticator code
+            <input data-testid="login-mfa" type="text" inputMode="numeric" autoComplete="one-time-code"
+              placeholder="6-digit code or emailed backup code"
+              value={mfaCode} onChange={e => setMfaCode(e.target.value)} />
+          </label>
+        )}
         <AuthError toast={toast} />
+        {oidcError && (
+          <div className="auth-alert error" role="alert">
+            Single sign-on failed ({oidcError}). Try again or use email + password.
+          </div>
+        )}
         <Button type="submit" data-testid="login-submit" disabled={busy}>
           {busy ? 'Signing in…' : 'Sign in'}
         </Button>
       </form>
       <div className="auth-divider"><span>or</span></div>
       <a className="btn secondary auth-oidc" href="/api/auth/oidc/login">Continue with OIDC</a>
-      <p className="auth-hint">First-boot password: <code>data/bootstrap-admin.txt</code></p>
       <button type="button" className="auth-link-btn" onClick={() => navigate('/landing')}>What is Trace? →</button>
     </AuthShell>
   )
@@ -106,10 +134,10 @@ export function RegisterPage() {
     setBusy(true)
     setToast(null)
     try {
-      await api('/api/auth/signup', { method: 'POST', body: { name, email, password } })
+      await api('/api/auth/register', { method: 'POST', body: { name, email, password } })
       setToast({ type: 'success', message: 'Account created — check your email to verify, then sign in.' })
     } catch (err: any) {
-      // Backend may require the invitation flow; surface its guidance verbatim.
+      // Registration may be disabled (invite-only); surface the backend guidance verbatim.
       setToast({ type: 'error', message: err.message || 'Signup failed' })
     } finally {
       setBusy(false)
@@ -134,8 +162,8 @@ export function RegisterPage() {
             value={email} onChange={e => setEmail(e.target.value)} />
         </label>
         <label>
-          Password <span className="auth-req">(min 12 chars)</span>
-          <input type="password" autoComplete="new-password" required minLength={12}
+          Password <span className="auth-req">(12–128 chars)</span>
+          <input type="password" autoComplete="new-password" required minLength={12} maxLength={128}
             value={password} onChange={e => setPassword(e.target.value)} />
         </label>
         <AuthError toast={toast} />
@@ -230,19 +258,117 @@ export function ResetPasswordPage() {
               value={token} onChange={e => setToken(e.target.value)} />
           </label>
           <label>
-            New password <span className="auth-req">(min 12 chars)</span>
-            <input type="password" autoComplete="new-password" required minLength={12}
+            New password <span className="auth-req">(12–128 chars)</span>
+            <input type="password" autoComplete="new-password" required minLength={12} maxLength={128}
               value={password} onChange={e => setPassword(e.target.value)} />
           </label>
           <label>
             Confirm password
-            <input type="password" autoComplete="new-password" required minLength={12}
+            <input type="password" autoComplete="new-password" required minLength={12} maxLength={128}
               value={confirm} onChange={e => setConfirm(e.target.value)} />
           </label>
           <AuthError toast={toast} />
           <Button type="submit" disabled={busy}>{busy ? 'Saving…' : 'Set new password'}</Button>
         </form>
       )}
+    </AuthShell>
+  )
+}
+
+export function VerifyEmailPage() {
+  const [searchParams] = useSearchParams()
+  const [state, setState] = useState<'working' | 'done' | 'error'>('working')
+  const [message, setMessage] = useState('')
+
+  React.useEffect(() => {
+    const token = searchParams.get('token') || ''
+    if (!token) {
+      setState('error')
+      setMessage('Missing verification token. Use the link from your email.')
+      return
+    }
+    let cancelled = false
+    api('/api/auth/verify-email', { method: 'POST', body: { token } })
+      .then(() => { if (!cancelled) setState('done') })
+      .catch((err: any) => {
+        if (!cancelled) {
+          setState('error')
+          setMessage(err.message || 'Verification failed')
+        }
+      })
+    return () => { cancelled = true }
+  }, [searchParams])
+
+  return (
+    <AuthShell
+      title="Verify your email"
+      footer={<span><Link to="/login">Sign in</Link></span>}
+    >
+      {state === 'working' && <p className="auth-subtitle">Verifying…</p>}
+      {state === 'done' && (
+        <div className="auth-alert success" role="status">
+          Email verified. <Link to="/login">Sign in →</Link>
+        </div>
+      )}
+      {state === 'error' && (
+        <div className="auth-alert error" role="alert">{message}</div>
+      )}
+    </AuthShell>
+  )
+}
+
+export function AcceptInvitePage() {
+  const [searchParams] = useSearchParams()
+  const [token] = useState(searchParams.get('token') || '')
+  const [name, setName] = useState('')
+  const [password, setPassword] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [toast, setToast] = useState<AuthToast>(null)
+
+  async function submit(e?: React.FormEvent) {
+    e?.preventDefault()
+    if (busy) return
+    setBusy(true)
+    setToast(null)
+    try {
+      const res = await api('/api/auth/invite/accept', {
+        method: 'POST', body: { invite_token: token, password, name },
+      })
+      setToken(res.token)
+      window.location.assign('/overview')
+    } catch (err: any) {
+      setToast({ type: 'error', message: err.message || 'Invite failed' })
+      setBusy(false)
+    }
+  }
+
+  return (
+    <AuthShell
+      title="Accept your invitation"
+      subtitle="Set your name and password to join the organization."
+      footer={<span>Already have an account? <Link to="/login">Sign in</Link></span>}
+    >
+      <form className="auth-form" onSubmit={submit}>
+        <label>
+          Name
+          <input type="text" autoComplete="name" required minLength={2}
+            value={name} onChange={e => setName(e.target.value)} />
+        </label>
+        <label>
+          Password <span className="auth-req">(12–128 chars)</span>
+          <input type="password" autoComplete="new-password" required minLength={12} maxLength={128}
+            value={password} onChange={e => setPassword(e.target.value)} />
+        </label>
+        <AuthError toast={toast} />
+        <Button type="submit" disabled={busy || !token}>
+          {busy ? 'Joining…' : 'Accept invitation'}
+        </Button>
+        {!token && (
+          <div className="auth-alert error" role="alert">
+            Missing invite token. Use the link from your invitation.
+          </div>
+        )}
+      </form>
     </AuthShell>
   )
 }

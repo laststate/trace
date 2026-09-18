@@ -75,8 +75,16 @@ export async function api(path: string, opts: ApiOpts = {}) {
     if (!r.ok) {
       const text = await r.text()
       if (r.status === 401) {
-        // session expired — clear token for non-login routes
+        // session expired - clear token for non-login routes
         if (!path.includes('/api/auth/login')) setToken('')
+        // Bounce authenticated app views to login. Public/landing/auth
+        // pages handle 401 themselves (forms show errors, not redirects).
+        if (typeof window !== 'undefined' && !path.startsWith('/api/auth/')) {
+          const p = window.location.pathname
+          if (!/^\/(login|register|forgot-password|reset-password|verify-email|accept-invite|landing|blog|faq|docs|pricing)/.test(p)) {
+            window.location.assign('/login')
+          }
+        }
       }
       throw new ApiError(r.status, text)
     }

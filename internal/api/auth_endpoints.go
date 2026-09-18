@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/laststate/trace/internal/auth"
+	"github.com/laststate/trace/internal/store"
 )
 
 // apiSignup handles user signup with email verification.
@@ -22,8 +23,8 @@ func (s *Server) apiSignup(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "bad_request", "email, password, and name are required", false)
 		return
 	}
-	if len(body.Password) < 12 {
-		writeErr(w, 400, "bad_request", "password must be at least 12 characters", false)
+	if err := store.CheckPasswordPolicy(body.Password); err != nil {
+		writeErr(w, 400, "bad_request", err.Error(), false)
 		return
 	}
 	writeErr(w, http.StatusNotImplemented, "signup_unavailable", "self-service signup requires the organization provisioning flow; use an invitation", false)
@@ -71,6 +72,7 @@ func (s *Server) apiForgotPassword(w http.ResponseWriter, r *http.Request) {
 	if err := s.Mailer.SendResetEmail(r.Context(), body.Email, token); err != nil {
 		s.Log.Warn("failed to send reset email", "email", body.Email, "error", err)
 	}
+	s.Store.Audit(r.Context(), nil, nil, nil, nil, "auth.forgot", "user", body.Email, clientIP(r), r.UserAgent(), nil)
 	// Always return success to prevent email enumeration.
 	writeJSON(w, 200, map[string]any{"message": "if the email exists, a reset link has been sent"})
 }
@@ -89,14 +91,15 @@ func (s *Server) apiResetPassword(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "bad_request", "token and new_password are required", false)
 		return
 	}
-	if len(body.NewPassword) < 12 {
-		writeErr(w, 400, "bad_request", "new_password must be at least 12 characters", false)
+	if err := store.CheckPasswordPolicy(body.NewPassword); err != nil {
+		writeErr(w, 400, "bad_request", err.Error(), false)
 		return
 	}
 	if err := s.Store.ResetPassword(r.Context(), body.Token, body.NewPassword); err != nil {
 		writeErr(w, 400, "bad_request", err.Error(), false)
 		return
 	}
+	s.Store.Audit(r.Context(), nil, nil, nil, nil, "auth.reset", "user", "token", clientIP(r), r.UserAgent(), nil)
 	writeJSON(w, 200, map[string]any{"message": "password reset successful"})
 }
 
@@ -117,19 +120,21 @@ func (s *Server) apiMfaEnroll(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "bad_request", "MFA already enabled", false)
 		return
 	}
-	// Generate TOTP key.
-	secret, err := auth.GenerateTOTPKey()
+	// Generate TOTP key (secret + otpauth URI for QR codes).
+	secret, uri, err := auth.GenerateTOTPKey(sess.Email)
 	if err != nil {
 		writeErr(w, 500, "internal", err.Error(), true)
 		return
 	}
-	// Store secret (but don't enable yet).
-	if _, err := s.Store.EnableMFA(r.Context(), sess.UserID, secret); err != nil {
+	// Stage the secret without enabling: enrollment completes only after
+	// the user proves possession via apiMfaVerify.
+	if err := s.Store.StageMFA(r.Context(), sess.UserID, secret); err != nil {
 		writeErr(w, 500, "internal", err.Error(), true)
 		return
 	}
 	writeJSON(w, 200, map[string]any{
 		"secret":  secret,
+		"otpauth": uri,
 		"message": "Add this secret to your authenticator app and verify the code",
 	})
 }
@@ -152,10 +157,10 @@ func (s *Server) apiMfaVerify(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 401, "unauthorized", "login required", false)
 		return
 	}
-	// Get the TOTP secret.
+	// Get the staged TOTP secret (enroll first).
 	secret, err := s.Store.GetMfaSecret(r.Context(), sess.UserID)
 	if err != nil {
-		writeErr(w, 500, "internal", err.Error(), true)
+		writeErr(w, 400, "bad_request", "no staged MFA secret; enroll first", false)
 		return
 	}
 	// Validate the code.
@@ -163,11 +168,12 @@ func (s *Server) apiMfaVerify(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "bad_request", "invalid MFA code", false)
 		return
 	}
-	// Enable MFA.
+	// Confirm enrollment only after a valid code.
 	if _, err := s.Store.EnableMFA(r.Context(), sess.UserID, secret); err != nil {
 		writeErr(w, 500, "internal", err.Error(), true)
 		return
 	}
+	s.Store.Audit(r.Context(), &sess.UserID, nil, &sess.OrganizationID, nil, "auth.mfa_enroll", "user", sess.UserID.String(), clientIP(r), r.UserAgent(), nil)
 	writeJSON(w, 200, map[string]any{"mfa_enabled": true})
 }
 
@@ -197,6 +203,7 @@ func (s *Server) apiMfaDisable(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "internal", err.Error(), true)
 		return
 	}
+	s.Store.Audit(r.Context(), &sess.UserID, nil, &sess.OrganizationID, nil, "auth.mfa_disable", "user", sess.UserID.String(), clientIP(r), r.UserAgent(), nil)
 	writeJSON(w, 200, map[string]any{"mfa_enabled": false})
 }
 
@@ -213,14 +220,18 @@ func (s *Server) apiMfaResendCode(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "bad_request", "email is required", false)
 		return
 	}
-	code, err := auth.GenerateMfaCode()
-	if err != nil {
-		writeErr(w, 500, "internal", err.Error(), true)
-		return
-	}
-	// Send MFA code email.
-	if err := s.Mailer.SendMfaCode(r.Context(), body.Email, code); err != nil {
-		s.Log.Warn("failed to send MFA code email", "email", body.Email, "error", err)
+	// Persist the code before emailing so it is verifiable (single-use,
+	// 10-minute expiry). Unknown emails still answer success (anti-enumeration).
+	if uid, err := s.Store.UserIDByEmail(r.Context(), body.Email); err == nil {
+		code, err := s.Store.IssueEmailCode(r.Context(), uid)
+		if err != nil {
+			writeErr(w, 500, "internal", err.Error(), true)
+			return
+		}
+		// Send MFA code email.
+		if err := s.Mailer.SendMfaCode(r.Context(), body.Email, code); err != nil {
+			s.Log.Warn("failed to send MFA code email", "email", body.Email, "error", err)
+		}
 	}
 	// Always return success.
 	writeJSON(w, 200, map[string]any{"message": "if the email exists, a code has been sent"})

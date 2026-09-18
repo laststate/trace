@@ -71,6 +71,25 @@ func (rl *rateLimiter) allow(ip string) bool {
 	return rl.hits[ip] <= rl.limit
 }
 
+// authRateLimiter is a strict per-IP limiter for credential-adjacent
+// endpoints (login, signup, password reset, MFA codes): 20 req/min per IP,
+// on top of the global limiter.
+var authRateLimiter = newRateLimiter(20, 5000)
+
+// limitAuth wraps an auth handler with the strict limiter. Over-limit
+// callers get 429 + Retry-After instead of reaching credential checks.
+func (s *Server) limitAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !authRateLimiter.allow(clientIP(r)) {
+			w.Header().Set("Retry-After", "60")
+			writeErr(w, http.StatusTooManyRequests, "rate_limited",
+				"too many auth attempts; retry in a minute", false)
+			return
+		}
+		next(w, r)
+	}
+}
+
 type connLimiter struct {
 	mu    sync.Mutex
 	max   int

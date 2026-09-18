@@ -74,6 +74,10 @@ func (s *Server) apiSwitchOrg(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "internal", err.Error(), true)
 		return
 	}
+	// Rotate the cookie too: JSON-only tokens leave cookie clients on the
+	// old org (the original bug).
+	s.setSessionCookie(w, raw)
+	s.Store.Audit(r.Context(), &sess.UserID, nil, &body.OrganizationID, nil, "auth.switch_org", "organization", body.OrganizationID.String(), clientIP(r), r.UserAgent(), nil)
 	writeJSON(w, 200, map[string]any{
 		"session_token":   raw,
 		"organization_id": body.OrganizationID,
@@ -123,6 +127,7 @@ func (s *Server) apiRevokeMeSession(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "internal", err.Error(), true)
 		return
 	}
+	s.Store.Audit(r.Context(), &sess.UserID, nil, &sess.OrganizationID, nil, "auth.session_revoke", "session", id.String(), clientIP(r), r.UserAgent(), nil)
 	writeJSON(w, 200, map[string]any{"revoked": true, "id": id})
 }
 
@@ -137,6 +142,7 @@ func (s *Server) apiRevokeOtherSessions(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, 500, "internal", err.Error(), true)
 		return
 	}
+	s.Store.Audit(r.Context(), &sess.UserID, nil, &sess.OrganizationID, nil, "auth.session_revoke_others", "user", sess.UserID.String(), clientIP(r), r.UserAgent(), nil)
 	writeJSON(w, 200, map[string]any{"revoked_others": true})
 }
 

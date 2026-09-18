@@ -8,8 +8,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/pquerna/otp/totp"
 
 	"github.com/laststate/trace/internal/api"
 	"github.com/laststate/trace/internal/config"
@@ -196,6 +199,59 @@ func TestLoginJSON(t *testing.T) {
 	h.ServeHTTP(rr, req)
 	if rr.Code != 401 {
 		t.Fatal(rr.Code)
+	}
+}
+
+func TestLoginMFAEnforcement(t *testing.T) {
+	s, st, _ := testAPI(t)
+	h := s.Handler()
+	ctx := context.Background()
+
+	email := "mfa-" + time.Now().Format("150405.000000") + "@t.local"
+	password := "supersecretpassword123"
+	p, err := st.DefaultProject(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := st.CreateUser(ctx, p.OrganizationID, email, password, "MFA", "viewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := totp.Generate(totp.GenerateOpts{Issuer: "LastState", AccountName: email})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.EnableMFA(ctx, u.ID, key.Secret()); err != nil {
+		t.Fatal(err)
+	}
+
+	login := func(mfa string) (int, string) {
+		payload := map[string]string{"email": email, "password": password}
+		if mfa != "" {
+			payload["mfa_code"] = mfa
+		}
+		body, _ := json.Marshal(payload)
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(body))
+		h.ServeHTTP(rr, req)
+		return rr.Code, rr.Body.String()
+	}
+
+	// 1. No code → mfa_required, no usable session.
+	if code, body := login(""); code != 401 || !strings.Contains(body, "mfa_required") {
+		t.Fatalf("want 401 mfa_required, got %d %s", code, body)
+	}
+	// 2. Wrong code → mfa_invalid.
+	if code, body := login("000000"); code != 401 || !strings.Contains(body, "mfa_invalid") {
+		t.Fatalf("want 401 mfa_invalid, got %d %s", code, body)
+	}
+	// 3. Valid TOTP → 200 with session.
+	valid, err := totp.GenerateCode(key.Secret(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, body := login(valid); code != 200 || !strings.Contains(body, "token") {
+		t.Fatalf("want 200 with token, got %d %s", code, body)
 	}
 }
 

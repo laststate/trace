@@ -715,15 +715,37 @@ const openapiJSON = `{
         "security": [{ "bearerAuth": [] }]
       }
     },
-    "/api/scim/v2/Users": {
+    "/scim/v2/Users": {
       "get": {
         "tags": ["admin"],
-        "summary": "SCIM v2 User list (experimental stub)",
+        "summary": "SCIM v2 User list (filter=userName eq, startIndex, count)",
         "security": [{ "bearerAuth": [] }]
       },
       "post": {
         "tags": ["admin"],
-        "summary": "SCIM v2 User create (experimental stub)",
+        "summary": "SCIM v2 User provision (creates passwordless user + membership)",
+        "security": [{ "bearerAuth": [] }]
+      }
+    },
+    "/scim/v2/Users/{id}": {
+      "get": {
+        "tags": ["admin"],
+        "summary": "SCIM v2 User read",
+        "security": [{ "bearerAuth": [] }]
+      },
+      "put": {
+        "tags": ["admin"],
+        "summary": "SCIM v2 User update (name, role; active=false deprovisions)",
+        "security": [{ "bearerAuth": [] }]
+      },
+      "patch": {
+        "tags": ["admin"],
+        "summary": "SCIM v2 User patch (same as PUT)",
+        "security": [{ "bearerAuth": [] }]
+      },
+      "delete": {
+        "tags": ["admin"],
+        "summary": "SCIM v2 User deprovision (removes membership)",
         "security": [{ "bearerAuth": [] }]
       }
     },
