@@ -219,7 +219,7 @@ export default function BillingView() {
             </div>
             <div>
               <div className="meta">Provider</div>
-              <div style={{ fontWeight: 600 }}>{data.subscription.provider === 'stripe' ? '💳 Card' : data.subscription.provider === 'mercado_pago' ? '🇧🇷 Pix/Cartão' : '₿ Crypto'}</div>
+              <div style={{ fontWeight: 600 }}>{data.subscription.provider === 'stripe' ? '💳 Card' : data.subscription.provider === 'mercado_pago' ? '🇧🇷 Pix/Card' : '₿ Crypto'}</div>
             </div>
             <div>
               <div className="meta">Usage this period</div>
