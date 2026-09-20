@@ -5,9 +5,9 @@ All notable changes to the LastState Trace backend.
 ## [Unreleased]
 
 ### Changed
-- **License is now Apache-2.0** (`Copyright 2026 LastState Contributors`),
-  same as the rest of the org. Note: this drops the previous AGPL-3.0
-  copyleft terms — speak up on the PR if that was intentional.
+- **License back to AGPL-3.0** - the Apache-2.0 switch removed the §13
+  lever behind the commercial Trace offering. Restored byte-identical;
+  only the holder line convention stays unified elsewhere.
 
 ### Fixed
 - **SCIM test isolation** - `TestSCIMBadID` used a fixed admin email, so the
