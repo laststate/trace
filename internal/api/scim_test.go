@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -33,7 +34,10 @@ func TestSCIMRequiresSession(t *testing.T) {
 func TestSCIMBadID(t *testing.T) {
 	s, st, _ := testAPI(t)
 	h := s.Handler()
-	secret := testUISession(t, st, "scim-admin@t.local", "admin")
+	// Unique email per run: CI runs `go test ./...` then `go test -race`
+	// against the same postgres service, so a fixed email collides on the
+	// second run with `duplicate key ... users_email_key`.
+	secret := testUISession(t, st, "scim-"+time.Now().Format("150405.000000")+"@t.local", "admin")
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/scim/v2/Users/not-a-uuid", nil)
 	req.Header.Set("Authorization", "Bearer "+secret)
