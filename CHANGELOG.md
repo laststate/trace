@@ -4,6 +4,8 @@ All notable changes to the LastState Trace backend.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-20
+
 ### Security
 - **MFA enforced at login** - enrolled users must pass TOTP (or a single-use
   emailed backup code); the password-minted session is revoked on any MFA

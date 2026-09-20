@@ -3,8 +3,8 @@ replicaCount:
   worker: 2
 
 image:
-  repository: laststate/trace
-  tag: "0.8.0"
+  repository: ghcr.io/laststate/trace
+  tag: ""
   pullPolicy: IfNotPresent
 
 service:
