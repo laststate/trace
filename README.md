@@ -137,7 +137,9 @@ TRACE_E2E_URL=http://localhost:8080 TRACE_E2E_TOKEN=… \
   go test -tags e2e ./scripts -count=1
 ```
 
-- Helm: `deploy/helm/trace/` (API + worker, Secret, backup PVC)
+- Helm: `deploy/helm/trace/` (API + worker, Secret, backup PVC). Tagged
+  releases also publish the chart to `oci://ghcr.io/laststate/charts` and the
+  image to `ghcr.io/laststate/trace` (see `.github/workflows/release.yml`).
 - OpenAPI: `GET /openapi.json` (version **0.8.0**)
 - More docs: [BACKUP_RESTORE.md](docs/BACKUP_RESTORE.md), [OBSERVABILITY.md](docs/OBSERVABILITY.md), [SCALE.md](docs/SCALE.md)
 
