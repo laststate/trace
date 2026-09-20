@@ -4,6 +4,12 @@ All notable changes to the LastState Trace backend.
 
 ## [Unreleased]
 
+### Fixed
+- **SCIM test isolation** - `TestSCIMBadID` used a fixed admin email, so the
+  `Race` step failed with a duplicate-key error against the same Postgres
+  service used by the earlier `Test` step. It now uses a unique email per
+  run like the other API tests.
+
 ## [0.9.0] - 2026-09-20
 
 ### Security
