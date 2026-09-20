@@ -2,8 +2,9 @@
 
 Observability backend for embedded firmware and hardware fleets.
 
-```
-Latch (device) → Relay → Trace (ingest / workers / UI)
+```mermaid
+flowchart LR
+    latch["Latch (device)"] --> relay["Relay"] --> trace["Trace (ingest / workers / UI)"]
 ```
 
 ## Quickstart
