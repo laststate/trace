@@ -226,6 +226,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/admin/organizations/{id}/entitlements", s.adminApplyEntitlements)
 	mux.HandleFunc("GET /v1/admin/organizations/{id}/entitlements", s.adminListEntitlements)
 
+	// Billing realtime webhook (v2 outbound events from billing-service).
+	// Verifies X-LastState-Signature; see billing_webhook.go.
+	mux.HandleFunc("POST /v1/billing/webhook", s.billingWebhook)
+
 	// Audit-chain integrity verifier (admin-only).
 	mux.HandleFunc("GET /api/admin/audit/verify", s.requireUI(s.apiAuditVerify, "admin"))
 

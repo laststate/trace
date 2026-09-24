@@ -25,35 +25,25 @@ type tierItem struct {
 	IsUnlimitedRetention bool     `json:"isUnlimitedRetention,omitempty"`
 }
 
-// enterpriseTiers is the managed-SaaS plan catalog. In enterprise mode the
-// billing service pushes real entitlements via the admin API; these tiers are
-// the display catalog for the billing view.
+// enterpriseTiers mirrors the currently published managed-service catalog.
+// Checkout is not wired through Trace yet, so these are informational only.
 func enterpriseTiers() []tierItem {
 	return []tierItem{
 		{
-			ID: "free", Name: "Free", PriceCents: 0, Currency: "usd",
-			MaxDevices: 5, MaxEventsPerDay: 1000, RetentionDays: 30,
-			MaxAPITokens: 1, MaxAlertRules: 0,
-			Features: []string{"symbolication"},
+			ID: "pilot", Name: "Pilot", PriceCents: 49900, Currency: "usd",
+			MaxDevices: 100, RetentionDays: 90,
+			Features: []string{"qualified_board", "signed_updates", "crash_reproduced_slo", "direct_support"},
 		},
 		{
-			ID: "hobbyist", Name: "Hobbyist", PriceCents: 900, Currency: "usd",
-			MaxDevices: 100, MaxEventsPerDay: 50000, RetentionDays: 90,
-			MaxAPITokens: 5, MaxAlertRules: 5,
-			Features: []string{"symbolication", "analytics_export", "custom_alerts"},
+			ID: "fleet", Name: "Fleet", PriceCents: 199900, Currency: "usd",
+			MaxDevices: 1000, RetentionDays: 365,
+			Features: []string{"qualified_boards_3", "elf_dwarf_symbolication", "postmortem_generation_customer_llm", "ingest_sla_99_5"},
 		},
 		{
-			ID: "team", Name: "Team", PriceCents: 4900, Currency: "usd",
-			MaxDevices: 1000, MaxEventsPerDay: 500000, RetentionDays: 365,
-			MaxAPITokens: 20, MaxAlertRules: 50,
-			Features: []string{"symbolication", "analytics_export", "custom_alerts", "custom_integrations", "oncall", "escalation", "audit_logs", "sso"},
-		},
-		{
-			ID: "enterprise", Name: "Enterprise", PriceCents: 19900, Currency: "usd",
-			MaxDevices: -1, MaxEventsPerDay: -1, RetentionDays: -1,
-			MaxAPITokens: -1, MaxAlertRules: -1,
-			IsUnlimitedDevices: true, IsUnlimitedEvents: true, IsUnlimitedRetention: true,
-			Features: []string{"symbolication", "analytics_export", "custom_alerts", "custom_integrations", "oncall", "escalation", "audit_logs", "sso", "priority_support", "sla", "on_prem"},
+			ID: "enterprise", Name: "Enterprise", PriceCents: 799900, Currency: "usd",
+			MaxDevices: -1, RetentionDays: -1,
+			IsUnlimitedDevices: true, IsUnlimitedRetention: true,
+			Features: []string{"qualified_boards_5", "ingest_sla_99_9", "commercial_trace_license", "indemnity", "field_application_engineer"},
 		},
 	}
 }
@@ -85,12 +75,13 @@ func (s *Server) apiBillingTiers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, 200, map[string]any{
-		"items":           tiers,
-		"tiers":           tiers,
-		"currency":        "usd",
-		"interval":        "month",
-		"deployment":      s.Cfg.Deployment,
-		"billing_enabled": !s.Cfg.IsLocal(),
+		"items":              tiers,
+		"tiers":              tiers,
+		"currency":           "usd",
+		"interval":           "month",
+		"deployment":         s.Cfg.Deployment,
+		"billing_enabled":    !s.Cfg.IsLocal(),
+		"checkout_available": false,
 	})
 }
 
@@ -173,26 +164,22 @@ func (s *Server) apiBillingPlans(w http.ResponseWriter, r *http.Request) {
 	} else {
 		plans = []plan{
 			{
-				ID: "free", Name: "Free", Price: "$0",
-				Features: []string{"5 devices", "1k events/day", "30-day retention", "symbolication"},
+				ID: "pilot", Name: "Pilot", Price: "$499/month",
+				Features: []string{"100 devices", "1 qualified board", "90-day retention", "signed updates"},
 			},
 			{
-				ID: "hobbyist", Name: "Hobbyist", Price: "$9",
-				Features:  []string{"100 devices", "50k events/day", "90-day retention", "custom alerts", "analytics export", "5 API tokens"},
+				ID: "fleet", Name: "Fleet", Price: "$1,999/month",
+				Features:  []string{"1,000 devices", "3 qualified boards", "1-year retention", "99.5% ingest SLA"},
 				Highlight: true,
 			},
 			{
-				ID: "team", Name: "Team", Price: "$49",
-				Features: []string{"1k devices", "500k events/day", "1-year retention", "SSO/SAML", "on-call", "audit logs", "20 API tokens"},
-			},
-			{
-				ID: "enterprise", Name: "Enterprise", Price: "$199",
-				Features: []string{"unlimited everything", "on-premise", "SLA", "priority support", "custom integrations"},
+				ID: "enterprise", Name: "Enterprise", Price: "$7,999/month",
+				Features: []string{"unlimited devices", "5-board signed matrix", "99.9% SLA", "commercial Trace license"},
 			},
 		}
 	}
 
-	writeJSON(w, 200, map[string]any{"plans": plans, "interval": "month", "deployment": s.Cfg.Deployment, "billing_enabled": !s.Cfg.IsLocal()})
+	writeJSON(w, 200, map[string]any{"plans": plans, "interval": "month", "deployment": s.Cfg.Deployment, "billing_enabled": !s.Cfg.IsLocal(), "checkout_available": false})
 }
 
 // apiUsageMetrics returns current usage as a flat metrics list in the shape the

@@ -69,11 +69,11 @@ export default function LandingPage() {
           </div>
           <div className="landing-feature">
             <h3>🌐 Open protocol, open ecosystem</h3>
-            <p>LEP v1 is an open, versioned, transport-independent binary contract. Third-party implementations welcome. Community-maintained board qualification reports.</p>
+    <p>LEP v2 is the current frozen, versioned, transport-independent binary contract; v1 remains accepted for compatibility. Third-party implementations welcome. Hardware qualification is board-specific.</p>
           </div>
           <div className="landing-feature">
-            <h3>💰 Free for hobbyists</h3>
-            <p>Start with 5 devices and 1k events/day for free. Upgrade when your fleet grows. No credit card required for the 14-day trial.</p>
+            <h3>💰 Free self-hosting</h3>
+            <p>Run the Local plan on your own infrastructure with unlimited devices, events, and retention. Paid plans add qualified hardware support and service commitments.</p>
           </div>
         </div>
       </section>
@@ -83,7 +83,7 @@ export default function LandingPage() {
         <h2>The stack</h2>
         <div className="landing-stack-grid">
           <div className="landing-stack-card">
-            <h3>Protocol (LEP v1)</h3>
+            <h3>Protocol (LEP v2)</h3>
             <p>Binary, versioned, transport-independent contract for firmware diagnostics. Apache 2.0.</p>
             <a href="https://github.com/laststate/protocol" target="_blank" rel="noreferrer">View repo →</a>
           </div>
@@ -108,60 +108,51 @@ export default function LandingPage() {
       {/* Pricing preview */}
       <section className="landing-section">
         <h2>Simple pricing</h2>
-        <p className="meta">Start free. Scale when you need it. All plans include self-hosted deployment.</p>
+        <p className="meta">Self-host for free. Paid plans add qualified hardware support and service commitments.</p>
         <div className="landing-pricing">
           <div className="landing-price-card">
-            <h3>Free</h3>
-            <div className="landing-price">$0<span className="landing-price-period">/mo</span></div>
+            <h3>Local</h3>
+            <div className="landing-price">$0<span className="landing-price-period">forever · self-host</span></div>
             <ul>
-              <li>5 devices</li>
-              <li>1k events/day</li>
-              <li>30-day retention</li>
-              <li>Symbolication</li>
+              <li>Unlimited devices, events, retention</li>
+              <li>Symbolication + issue tracking</li>
+              <li>Community support</li>
             </ul>
             <a href="/pricing" className="btn secondary">Get started</a>
           </div>
           <div className="landing-price-card landing-price-highlight">
             <div className="landing-price-badge">Most popular</div>
-            <h3>Hobbyist</h3>
-            <div className="landing-price">$9<span className="landing-price-period">/mo</span></div>
+            <h3>Pilot</h3>
+            <div className="landing-price">$499<span className="landing-price-period">/mo · 1 board</span></div>
             <ul>
-              <li>100 devices</li>
-              <li>50k events/day</li>
-              <li>90-day retention</li>
-              <li>Custom alerts</li>
-              <li>Analytics export</li>
-              <li>5 API tokens</li>
+              <li>100 devices · 90-day retention</li>
+              <li>Signed updates</li>
+              <li>Crash-reproduced SLO</li>
             </ul>
-            <a href="/pricing" className="btn primary">Start trial</a>
+            <a href="https://laststate.io/design-partner" className="btn primary">Discuss a pilot</a>
           </div>
           <div className="landing-price-card">
-            <h3>Team</h3>
-            <div className="landing-price">$49<span className="landing-price-period">/mo</span></div>
+            <h3>Fleet</h3>
+            <div className="landing-price">$1,999<span className="landing-price-period">/mo · 3 boards</span></div>
             <ul>
-              <li>1k devices</li>
-              <li>500k events/day</li>
-              <li>1-year retention</li>
-              <li>SSO / SAML</li>
-              <li>On-call schedules</li>
-              <li>Audit logs</li>
-              <li>20 API tokens</li>
+              <li>1,000 devices · 1-year retention</li>
+              <li>Symbolication + postmortem generation*</li>
+              <li>99.5% ingest SLA</li>
             </ul>
-            <a href="/pricing" className="btn secondary">Start trial</a>
+            <a href="https://laststate.io/design-partner" className="btn secondary">Discuss a pilot</a>
           </div>
           <div className="landing-price-card">
             <h3>Enterprise</h3>
-            <div className="landing-price">$199<span className="landing-price-period">/mo</span></div>
+            <div className="landing-price">$7,999<span className="landing-price-period">/mo · signed matrix</span></div>
             <ul>
-              <li>Unlimited everything</li>
-              <li>On-premise / air-gapped</li>
-              <li>SLA guarantee</li>
-              <li>Priority support</li>
-              <li>Custom integrations</li>
+              <li>Unlimited devices · 5 qualified boards</li>
+              <li>99.9% SLA + credits</li>
+              <li>Commercial Trace license + FAE</li>
             </ul>
-            <a href="/pricing" className="btn secondary">Contact sales</a>
+            <a href="https://laststate.io/design-partner" className="btn secondary">Contact the team</a>
           </div>
         </div>
+        <p className="meta">*Postmortem LLM calls require a customer-provided API key; usage is billed by the model provider.</p>
       </section>
 
       {/* CTA */}

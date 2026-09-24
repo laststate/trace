@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react'
 import { api } from '../api'
 import { Button } from '../components/ui/button'
 import { Badge } from '../components/ui/badge'
-import { Check, CreditCard, Globe, Lock, Sparkles } from '../icons'
+import { Check, Sparkles } from '../icons'
 
 interface Plan {
   name: string
@@ -39,7 +39,6 @@ interface BillingData {
 export default function BillingView() {
   const [data, setData] = useState<BillingData | null>(null)
   const [loading, setLoading] = useState(true)
-  const [checkoutUrl, setCheckoutUrl] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -67,22 +66,6 @@ export default function BillingView() {
         setLoading(false)
       }
     })()
-  }, [])
-
-  const handleUpgrade = useCallback(async (planId: string) => {
-    try {
-      const res = await api('/v1/billing/checkout', {
-        method: 'POST',
-        body: { plan_id: planId, provider: 'stripe' },
-      })
-      if (res.url) {
-        window.location.href = res.url
-      } else {
-        setCheckoutUrl(res.url || null)
-      }
-    } catch (e: any) {
-      setError(e.message)
-    }
   }, [])
 
   const handleCancel = useCallback(async () => {
@@ -295,7 +278,7 @@ export default function BillingView() {
               </div>
               <ul style={{ paddingLeft: '1.25rem', margin: '1rem 0', fontSize: '0.85rem' }}>
                 <li>{fmtCount(tier.maxDevices)} devices {tier.isUnlimitedDevices ? '(unlimited)' : ''}</li>
-                <li>{fmtCount(tier.maxEventsPerDay)} events/day {tier.isUnlimitedEvents ? '(unlimited)' : ''}</li>
+                {tier.maxEventsPerDay > 0 && <li>{fmtCount(tier.maxEventsPerDay)} events/day {tier.isUnlimitedEvents ? '(unlimited)' : ''}</li>}
                 <li>{fmtDays(tier.retentionDays)} retention {tier.isUnlimitedRetention ? '(unlimited)' : ''}</li>
                 <li>{tier.maxApiTokens > 0 ? `${tier.maxApiTokens} API tokens` : '—'}</li>
                 <li>{tier.maxAlertRules > 0 ? `${tier.maxAlertRules} alert rules` : '—'}</li>
@@ -314,17 +297,13 @@ export default function BillingView() {
                   <Button type="button" variant="secondary" fullWidth disabled>
                     Current plan
                   </Button>
-                ) : data?.subscription?.status === 'active' ? (
-                  <Button type="button" variant="default" fullWidth onClick={() => handleUpgrade(tier.id)}>
-                    Upgrade to {tier.name}
-                  </Button>
-                ) : tier.id !== 'free' ? (
-                  <Button type="button" variant="default" fullWidth onClick={() => handleUpgrade(tier.id)}>
-                    Subscribe
-                  </Button>
+                ) : tier.id !== 'local' ? (
+                  <a href="https://laststate.io/design-partner" className="btn primary" style={{ display: 'block', textAlign: 'center' }}>
+                    Discuss {tier.name}
+                  </a>
                 ) : (
                   <Button type="button" variant="ghost" fullWidth disabled>
-                    Free tier
+                    Self-hosted
                   </Button>
                 )}
               </div>
@@ -333,32 +312,9 @@ export default function BillingView() {
         })}
       </div>
 
-      {/* Payment methods */}
       <div className="panel" style={{ marginTop: '2rem' }}>
-        <h2 style={{ marginTop: 0 }}>Payment methods</h2>
-        <div className="grid-3">
-          <div style={{ padding: '1rem', border: '1px solid hsl(0 0% 12%)', borderRadius: '0.5rem' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
-              <CreditCard size={18} />
-              <strong>Stripe</strong>
-            </div>
-            <p className="meta">Credit & debit cards. Global (USD, EUR, GBP).</p>
-          </div>
-          <div style={{ padding: '1rem', border: '1px solid hsl(0 0% 12%)', borderRadius: '0.5rem' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
-              <Globe size={18} />
-              <strong>Mercado Pago</strong>
-            </div>
-            <p className="meta">Pix, boleto, credit cards. Brazil & LatAm (BRL, USD).</p>
-          </div>
-          <div style={{ padding: '1rem', border: '1px solid hsl(0 0% 12%)', borderRadius: '0.5rem' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
-              <Lock size={18} />
-              <strong>Crypto</strong>
-            </div>
-            <p className="meta">Bitcoin, Ethereum, USDC via Coinbase Commerce.</p>
-          </div>
-        </div>
+        <h2 style={{ marginTop: 0 }}>Checkout</h2>
+        <p className="meta">Self-service checkout and subscription management are not connected in this Trace deployment. Contact LastState to discuss a paid pilot and confirm current payment options.</p>
       </div>
 
       {/* FAQ */}
@@ -367,28 +323,25 @@ export default function BillingView() {
         <details style={{ marginBottom: '0.75rem' }}>
           <summary style={{ cursor: 'pointer', fontWeight: 500 }}>What happens when I exceed my limits?</summary>
           <p className="meta" style={{ marginTop: '0.5rem' }}>
-            When you exceed your daily event limit, new events are still ingested but not processed.
-            When you exceed your device limit, new devices are registered but not tracked.
-            You'll be notified via email and in the UI.
+            Device and event limits depend on the current plan. Contact the team before rollout if your fleet may exceed its plan limits.
           </p>
         </details>
         <details style={{ marginBottom: '0.75rem' }}>
           <summary style={{ cursor: 'pointer', fontWeight: 500 }}>Can I downgrade mid-cycle?</summary>
           <p className="meta" style={{ marginTop: '0.5rem' }}>
-            Yes. Downgrades take effect at the end of the current billing period.
-            You'll keep access to your current tier until then.
+            Cancellation and access timing follow the subscription terms. Contact the team for current billing details.
           </p>
         </details>
         <details style={{ marginBottom: '0.75rem' }}>
           <summary style={{ cursor: 'pointer', fontWeight: 500 }}>Is there a free trial?</summary>
           <p className="meta" style={{ marginTop: '0.5rem' }}>
-            New organizations get a 14-day trial on the Team plan. No credit card required.
+            Local self-hosting is free. Paid hardware qualification starts with a 30-day, one-board POC; see the current terms before purchasing.
           </p>
         </details>
         <details>
-          <summary style={{ cursor: 'pointer', fontWeight: 500 }}>What is the Team trial?</summary>
+          <summary style={{ cursor: 'pointer', fontWeight: 500 }}>What payment methods are available?</summary>
           <p className="meta" style={{ marginTop: '0.5rem' }}>
-            The Team plan trial gives you full access to SSO, on-call, audit logs, and 20 API tokens for 14 days.
+            Payment methods depend on the configured checkout and your region. Contact the team for current options.
           </p>
         </details>
       </div>

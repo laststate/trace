@@ -13,8 +13,8 @@ const faqs = [
     a: "Latch supports Cortex-M (STM32, nRF, etc.), RISC-V (RV32/RV64), Xtensa (ESP32), and Linux signal capture. We maintain a hardware compatibility matrix with board-specific qualification reports.",
   },
   {
-    q: "Is this free for hobbyists?",
-    a: "Yes! The Free tier gives you 5 devices, 1k events/day, and 30-day retention at zero cost. No credit card required. The Hobbyist plan ($9/mo) adds 100 devices and 50k events/day.",
+    q: "Can I use LastState for free?",
+    a: "Yes. The Local plan is free for self-hosting, with unlimited devices, events, and retention. Paid plans add qualified hardware support, service levels, and other listed benefits. See the current pricing page for the offer and terms.",
   },
   {
     q: "Can I self-host everything?",
@@ -22,7 +22,7 @@ const faqs = [
   },
   {
     q: "What is the LEP protocol?",
-    a: "LEP (LastState Event Protocol) v1 is an open, versioned, transport-independent binary contract for firmware diagnostics. It defines the wire format for crash envelopes, identity, encryption, and transport framing.",
+    a: "LEP (LastState Event Protocol) v2 is the current frozen wire contract; v1 remains supported for compatibility. It defines transport-independent firmware diagnostic envelopes, identity, integrity, and framing.",
   },
   {
     q: "How does crash capture work?",
@@ -34,7 +34,7 @@ const faqs = [
   },
   {
     q: "What about security and compliance?",
-    a: "Latch supports XChaCha20-Poly1305 envelope encryption, HKDF-SHA-256 key derivation, replay windows, and hardware-backed key contracts. Trace provides audit logs, SSO/SAML, and SOC 2 readiness. Enterprise plan includes SLA and on-premise deployment.",
+    a: "Latch supports authenticated encryption and key-provider contracts, but its cryptography has not had an independent audit. LastState does not claim SOC 2 certification. Check the security and hardware qualification documentation before production use; support and service commitments depend on the selected plan.",
   },
   {
     q: "How do I contribute?",
@@ -42,7 +42,7 @@ const faqs = [
   },
   {
     q: "What about support?",
-    a: "Community support is available via GitHub Discussions. Team plan includes email support. Enterprise plan includes priority support with SLA guarantees.",
+    a: "The Local plan includes community support. Paid plans list their support and service commitments on the current pricing page. There is no Team plan in the current offer.",
   },
 ]
 
